@@ -29,6 +29,7 @@ apart.
 | `src/auth.rs` | token generation and the admin check |
 | `src/audit.rs` | the audit log |
 | `src/export.rs` | CSV rendering |
+| `src/bin/devdb.rs` | the embedded PostgreSQL used for local development |
 | `src/ui/material.rs` | the Material 3 component set |
 | `src/ui/invite.rs` | the guest-facing invitation page |
 | `src/ui/admin.rs` | the admin panel |
@@ -42,19 +43,30 @@ mobile data, and there is no web font, icon font or CDN request in the bundle.
 
 ### Development
 
-You need a PostgreSQL database. The quickest way is the one in the compose file:
-
-```bash
-docker compose up -d postgres
-```
-
 ```bash
 cargo install dioxus-cli --locked   # or: cargo binstall dioxus-cli
 ```
 
+You do not need PostgreSQL installed. `cargo dev` runs an embedded one and hands
+its URL to whatever command follows:
+
 ```bash
-HAINVITER_DATABASE_URL=postgres://hainviter:hainviter@localhost:5432/hainviter dx serve
+cargo dev dx serve
 ```
+
+The first run downloads a real PostgreSQL 18 (about 100 MB) into a directory of
+its own and keeps it; later runs start in well under a second and the data from
+last time is still there. `HAINVITER_DEV_DB_DIR` moves that directory;
+`cargo dev` with no command prints the URL and waits, for use from another
+terminal. It is [`src/bin/devdb.rs`](src/bin/devdb.rs), behind the `dev-db`
+feature, and is never built for the container image.
+
+It runs a real PostgreSQL rather than SQLite or a mock deliberately. A second
+backend would mean every query written twice in two dialects, and the failure
+mode of that is local development passing while production breaks.
+
+If you would rather bring your own database, set `HAINVITER_DATABASE_URL` and run
+`dx serve` directly — `docker compose up -d postgres` will start a suitable one.
 
 The admin link is printed to the terminal on startup:
 
@@ -72,6 +84,12 @@ The admin link is printed to the terminal on startup:
 The unit tests need nothing. The end-to-end test needs a **scratch** database —
 the first thing it does is drop the schema, which is why it reads a variable of
 its own rather than the one the application uses:
+
+```bash
+cargo dev bash -c 'HAINVITER_TEST_DATABASE_URL=$HAINVITER_DATABASE_URL cargo test --features server'
+```
+
+or point it at a database of your own:
 
 ```bash
 HAINVITER_TEST_DATABASE_URL=postgres://hainviter:hainviter@localhost:5432/hainviter_test cargo test --features server

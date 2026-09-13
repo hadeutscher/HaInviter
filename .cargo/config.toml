@@ -1,0 +1,4 @@
+[alias]
+# `cargo dev dx serve` starts an embedded PostgreSQL and runs `dx serve`
+# against it; anything after `dev` is the command to run. See src/bin/devdb.rs.
+dev = ["run", "--quiet", "--features", "dev-db", "--bin", "devdb", "--"]

@@ -50,8 +50,10 @@ jobs:
       - name: Check | Formatting
         run: cargo fmt --all --check
 
+      # dev-db is included so the development helper is linted too; without it
+      # `required-features` excludes that target and it would rot unnoticed.
       - name: Check | Clippy (server)
-        run: cargo clippy --features server --all-targets -- -D warnings
+        run: cargo clippy --features server,dev-db --all-targets -- -D warnings
 
       # The client half of the app only exists on wasm32, so it needs its own
       # pass: a change that breaks the browser build compiles fine natively.

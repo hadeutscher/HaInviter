@@ -15,6 +15,10 @@ publish = false
 [features]
 default = []
 web = ["dioxus/web"]
+# Development only: builds the `devdb` helper below. Never enabled for the
+# container image, so neither PostgreSQL's binaries nor the machinery that
+# downloads them reach production.
+dev-db = ["dep:postgresql_embedded", "dep:tokio", "tokio/signal"]
 server = [
     "dioxus/server",
     "dep:axum",
@@ -33,6 +37,13 @@ deadpool-postgres = { version = "0.14", default-features = false, features = [
 ], optional = true }
 dioxus = { version = "0.7", features = ["fullstack", "router"] }
 getrandom = { version = "0.3", optional = true }
+# rustls rather than the default native-tls: a development helper must not
+# require a system OpenSSL on every contributor's machine.
+postgresql_embedded = { version = "0.21", default-features = false, features = [
+    "tls-rustls-ring",
+    "tokio",
+    "zonky",
+], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 # No TLS: the database is reached over the cluster's own network, and pulling in
@@ -42,6 +53,17 @@ tokio = { version = "1", default-features = false, features = [
     "macros",
     "rt-multi-thread",
 ], optional = true }
+
+# Declared explicitly so the development helper can require its own feature:
+# without that, `cargo build` on a fresh checkout would try to compile it.
+[[bin]]
+name = "hainviter"
+path = "src/main.rs"
+
+[[bin]]
+name = "devdb"
+path = "src/bin/devdb.rs"
+required-features = ["dev-db"]
 
 # Lean release profile: this runs on a Raspberry Pi, so trade build time for a
 # smaller, faster binary. `strip` keeps the image small.
