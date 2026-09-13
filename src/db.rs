@@ -1,53 +1,35 @@
-//! SQLite persistence.
+//! PostgreSQL persistence.
 //!
-//! One process, one small database file, so a single connection behind a mutex
-//! is both sufficient and the leanest option available — there is no pool, no
-//! background worker and no network database to keep alive on a Raspberry Pi.
-//! Blocking work is pushed onto Tokio's blocking pool by [`with_db`].
+//! Postgres rather than an embedded database so the application can run more
+//! than one replica: nothing of consequence lives in the process or on its
+//! local disk. That includes uploaded cover images, which are stored here as
+//! `bytea` precisely so no shared filesystem is needed, and the admin token,
+//! which every replica must agree on.
+//!
+//! Timestamps are stored as RFC 3339 text. They are only ever displayed,
+//! exported or compared for ordering — and ISO 8601 sorts lexicographically —
+//! so the extra ceremony of `timestamptz` would buy nothing here.
 
 use crate::types::{EventAdminView, EventInput, EventSummary, GuestDto, InviteView, Rsvp};
-use rusqlite::{Connection, OptionalExtension, params};
-use std::{
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
-};
+use deadpool_postgres::{Config, Pool, Runtime};
+use std::sync::OnceLock;
+use tokio_postgres::{GenericClient, NoTls};
 
-/// Shared handle to the one and only connection.
-pub type Db = Arc<Mutex<Connection>>;
+static POOL: OnceLock<Pool> = OnceLock::new();
 
-static DB: OnceLock<Db> = OnceLock::new();
-
-// ---------------------------------------------------------------------------
-// Paths
-// ---------------------------------------------------------------------------
-
-/// Directory holding every piece of state we must not lose: the database, the
-/// audit log and uploaded cover images. Mounted as a host volume in production.
-pub fn data_dir() -> PathBuf {
-    std::env::var_os("HAINVITER_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/data"))
-}
-
-/// Where uploaded cover images are stored and served from.
-pub fn uploads_dir() -> PathBuf {
-    data_dir().join("uploads")
-}
-
-/// Path of the SQLite database file.
-pub fn db_path() -> PathBuf {
-    data_dir().join("hainviter.db")
-}
+/// Identifies the migration advisory lock. Several replicas start at once, and
+/// exactly one of them may apply a migration.
+const MIGRATION_LOCK: i64 = 0x4841_494E_5654_5201;
 
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
 
-/// Schema migrations, applied in order. The index of the last applied entry is
-/// stored in SQLite's own `user_version`, so adding a migration is append-only.
+/// Migrations, applied in order; the highest applied index is recorded in
+/// `schema_version`, so adding one is append-only.
 const MIGRATIONS: &[&str] = &[r"
     CREATE TABLE events (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        id              BIGSERIAL PRIMARY KEY,
         title           TEXT    NOT NULL,
         hosts           TEXT    NOT NULL DEFAULT '',
         description     TEXT    NOT NULL DEFAULT '',
@@ -56,109 +38,166 @@ const MIGRATIONS: &[&str] = &[r"
         location_url    TEXT    NOT NULL DEFAULT '',
         starts_at       TEXT    NOT NULL DEFAULT '',
         rsvp_deadline   TEXT    NOT NULL DEFAULT '',
-        allow_plus_ones INTEGER NOT NULL DEFAULT 1,
+        allow_plus_ones BOOLEAN NOT NULL DEFAULT TRUE,
         created_at      TEXT    NOT NULL
     );
 
     CREATE TABLE guests (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        event_id        INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+        id              BIGSERIAL PRIMARY KEY,
+        event_id        BIGINT  NOT NULL REFERENCES events (id) ON DELETE CASCADE,
         name            TEXT    NOT NULL,
         token           TEXT    NOT NULL UNIQUE,
-        max_party_size  INTEGER NOT NULL DEFAULT 1,
+        max_party_size  BIGINT  NOT NULL DEFAULT 1,
         status          TEXT    NOT NULL DEFAULT 'pending',
-        party_size      INTEGER NOT NULL DEFAULT 0,
+        party_size      BIGINT  NOT NULL DEFAULT 0,
         note            TEXT    NOT NULL DEFAULT '',
         responded_at    TEXT    NOT NULL DEFAULT '',
         created_at      TEXT    NOT NULL
     );
     CREATE INDEX guests_event_idx ON guests (event_id);
+    CREATE UNIQUE INDEX guests_event_name_idx ON guests (event_id, lower(name));
 
     -- Append-only history of every reply ever received. Deliberately carries no
     -- foreign key: deleting a guest or an event must never erase the record of
     -- what they answered.
     CREATE TABLE rsvp_log (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        id          BIGSERIAL PRIMARY KEY,
         at          TEXT    NOT NULL,
-        event_id    INTEGER NOT NULL,
+        event_id    BIGINT  NOT NULL,
         event_title TEXT    NOT NULL,
-        guest_id    INTEGER NOT NULL,
+        guest_id    BIGINT  NOT NULL,
         guest_name  TEXT    NOT NULL,
         status      TEXT    NOT NULL,
-        party_size  INTEGER NOT NULL,
+        party_size  BIGINT  NOT NULL,
         note        TEXT    NOT NULL
     );
     CREATE INDEX rsvp_log_event_idx ON rsvp_log (event_id);
+
+    -- Cover images live in the database so that replicas need no shared
+    -- filesystem. They are a handful of photographs, not a media library.
+    CREATE TABLE cover_images (
+        id           TEXT NOT NULL PRIMARY KEY,
+        content_type TEXT NOT NULL,
+        bytes        BYTEA NOT NULL,
+        created_at   TEXT NOT NULL
+    );
+
+    -- Process-wide settings that must be identical across replicas; currently
+    -- just the generated admin token.
+    CREATE TABLE settings (
+        key   TEXT NOT NULL PRIMARY KEY,
+        value TEXT NOT NULL
+    );
     "];
 
-/// Opens (creating if needed) the database at `path`, applies migrations and
-/// installs it as the process-wide handle.
-pub fn init(path: &Path) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+// ---------------------------------------------------------------------------
+// Connecting
+// ---------------------------------------------------------------------------
+
+/// Reads the connection string. `HAINVITER_DATABASE_URL` wins; `DATABASE_URL`
+/// is accepted because almost every Postgres tool sets it.
+pub fn database_url() -> Result<String, String> {
+    for key in ["HAINVITER_DATABASE_URL", "DATABASE_URL"] {
+        if let Ok(url) = std::env::var(key)
+            && !url.trim().is_empty()
+        {
+            return Ok(url.trim().to_owned());
+        }
     }
-    let mut conn = Connection::open(path).map_err(|e| e.to_string())?;
-
-    // WAL survives an unclean shutdown and keeps readers off the writer's back;
-    // synchronous=FULL costs a little throughput per RSVP and buys durability
-    // against power loss, which is exactly the right trade here.
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = FULL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 5000;",
+    Err(
+        "HAINVITER_DATABASE_URL is not set: HaInviter needs a PostgreSQL \
+         connection string, e.g. postgres://user:password@host:5432/hainviter"
+            .to_owned(),
     )
-    .map_err(|e| e.to_string())?;
+}
 
-    migrate(&mut conn).map_err(|e| format!("migration failed: {e}"))?;
+/// Builds the pool, verifies it can connect, and applies migrations.
+pub async fn init(url: &str) -> Result<(), String> {
+    let mut cfg = Config::new();
+    cfg.url = Some(url.to_owned());
+    let pool = cfg
+        .create_pool(Some(Runtime::Tokio1), NoTls)
+        .map_err(|e| format!("cannot configure the database pool: {e}"))?;
 
-    DB.set(Arc::new(Mutex::new(conn)))
+    // Fail here rather than on the first request: a replica that cannot reach
+    // its database should never report itself as ready.
+    let mut client = pool
+        .get()
+        .await
+        .map_err(|e| format!("cannot connect to the database: {e}"))?;
+    migrate(&mut client)
+        .await
+        .map_err(|e| format!("migration failed: {e}"))?;
+    drop(client);
+
+    POOL.set(pool)
         .map_err(|_| "database already initialised".to_owned())
 }
 
-fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
-    let applied: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    let applied = applied.max(0) as usize;
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(applied) {
-        let tx = conn.transaction()?;
-        tx.execute_batch(sql)?;
-        // PRAGMA does not accept bound parameters.
-        tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1))?;
-        tx.commit()?;
-        println!("db: applied migration {}", i + 1);
-    }
-    Ok(())
+/// Checks out a connection from the pool.
+pub async fn client() -> Result<deadpool_postgres::Object, String> {
+    POOL.get()
+        .ok_or_else(|| "database not initialised".to_owned())?
+        .get()
+        .await
+        .map_err(|e| format!("no database connection available: {e}"))
 }
 
-// ---------------------------------------------------------------------------
-// Access
-// ---------------------------------------------------------------------------
+async fn migrate(client: &mut deadpool_postgres::Object) -> Result<(), tokio_postgres::Error> {
+    let tx = client.transaction().await?;
+    // Serialises concurrent replicas; released when this transaction ends.
+    tx.query("SELECT pg_advisory_xact_lock($1)", &[&MIGRATION_LOCK])
+        .await?;
+    tx.batch_execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
+        .await?;
+    let applied: i32 = tx
+        .query_one("SELECT COALESCE(MAX(version), 0) FROM schema_version", &[])
+        .await?
+        .get(0);
 
-/// Runs `f` against the database on Tokio's blocking pool.
-///
-/// Errors are stringified because they cross a `spawn_blocking` boundary on
-/// their way into a `ServerFnError`, and no caller can act on the distinction.
-pub async fn with_db<T, F>(f: F) -> Result<T, String>
-where
-    F: FnOnce(&mut Connection) -> rusqlite::Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    let db = DB
-        .get()
-        .ok_or_else(|| "database not initialised".to_owned())?
-        .clone();
-    tokio::task::spawn_blocking(move || {
-        let mut guard = db.lock().map_err(|_| "database lock poisoned".to_owned())?;
-        f(&mut guard).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("database task failed: {e}"))?
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(applied.max(0) as usize) {
+        let version = i as i32 + 1;
+        tx.batch_execute(sql).await?;
+        tx.execute(
+            "INSERT INTO schema_version (version) VALUES ($1)",
+            &[&version],
+        )
+        .await?;
+        println!("db: applied migration {version}");
+    }
+    tx.commit().await
 }
 
 /// Current time as an RFC 3339 UTC string, the one timestamp format stored.
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+/// Reads a setting, storing and returning `default` if it is not there yet.
+///
+/// The insert is `ON CONFLICT DO NOTHING` followed by a read, so when several
+/// replicas start together they all end up with the value the first one wrote.
+pub async fn setting_or_insert<C: GenericClient>(
+    client: &C,
+    key: &str,
+    default: &str,
+) -> Result<String, String> {
+    client
+        .execute(
+            "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",
+            &[&key, &default],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let row = client
+        .query_one("SELECT value FROM settings WHERE key = $1", &[&key])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(row.get(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -168,118 +207,137 @@ pub fn now() -> String {
 const EVENT_FIELDS: &str = "title, hosts, description, cover_image, location, \
                             location_url, starts_at, rsvp_deadline, allow_plus_ones";
 
-fn event_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<EventInput> {
-    Ok(EventInput {
-        title: row.get(offset)?,
-        hosts: row.get(offset + 1)?,
-        description: row.get(offset + 2)?,
-        cover_image: row.get(offset + 3)?,
-        location: row.get(offset + 4)?,
-        location_url: row.get(offset + 5)?,
-        starts_at: row.get(offset + 6)?,
-        rsvp_deadline: row.get(offset + 7)?,
-        allow_plus_ones: row.get::<_, i64>(offset + 8)? != 0,
-    })
+fn event_from_row(row: &tokio_postgres::Row, offset: usize) -> EventInput {
+    EventInput {
+        title: row.get(offset),
+        hosts: row.get(offset + 1),
+        description: row.get(offset + 2),
+        cover_image: row.get(offset + 3),
+        location: row.get(offset + 4),
+        location_url: row.get(offset + 5),
+        starts_at: row.get(offset + 6),
+        rsvp_deadline: row.get(offset + 7),
+        allow_plus_ones: row.get(offset + 8),
+    }
 }
 
 /// All events, soonest first, with events that have no date last.
-pub fn list_events(conn: &Connection) -> rusqlite::Result<Vec<EventSummary>> {
-    let mut stmt = conn.prepare(
-        "SELECT e.id, e.title, e.starts_at, e.location,
-                (SELECT COUNT(*) FROM guests g WHERE g.event_id = e.id),
-                (SELECT COUNT(*) FROM guests g WHERE g.event_id = e.id AND g.status = 'attending'),
-                (SELECT COUNT(*) FROM guests g WHERE g.event_id = e.id AND g.status = 'declined'),
-                (SELECT COUNT(*) FROM guests g WHERE g.event_id = e.id AND g.status = 'pending'),
-                (SELECT COALESCE(SUM(g.party_size), 0) FROM guests g
-                  WHERE g.event_id = e.id AND g.status = 'attending')
-         FROM events e
-         ORDER BY (e.starts_at = '') ASC, e.starts_at ASC, e.id DESC",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(EventSummary {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            starts_at: row.get(2)?,
-            location: row.get(3)?,
-            guest_count: row.get(4)?,
-            attending: row.get(5)?,
-            declined: row.get(6)?,
-            pending: row.get(7)?,
-            head_count: row.get(8)?,
+pub async fn list_events<C: GenericClient>(client: &C) -> Result<Vec<EventSummary>, String> {
+    let rows = client
+        .query(
+            "SELECT e.id, e.title, e.starts_at, e.location,
+                    COUNT(g.id),
+                    COUNT(g.id) FILTER (WHERE g.status = 'attending'),
+                    COUNT(g.id) FILTER (WHERE g.status = 'declined'),
+                    COUNT(g.id) FILTER (WHERE g.status = 'pending'),
+                    COALESCE(SUM(g.party_size) FILTER (WHERE g.status = 'attending'), 0)::BIGINT
+             FROM events e LEFT JOIN guests g ON g.event_id = e.id
+             GROUP BY e.id
+             ORDER BY (e.starts_at = '') ASC, e.starts_at ASC, e.id DESC",
+            &[],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| EventSummary {
+            id: row.get(0),
+            title: row.get(1),
+            starts_at: row.get(2),
+            location: row.get(3),
+            guest_count: row.get(4),
+            attending: row.get(5),
+            declined: row.get(6),
+            pending: row.get(7),
+            head_count: row.get(8),
         })
-    })?;
-    rows.collect()
+        .collect())
 }
 
-pub fn create_event(conn: &Connection, input: &EventInput) -> rusqlite::Result<i64> {
-    conn.execute(
-        "INSERT INTO events (title, hosts, description, cover_image, location, location_url,
-                             starts_at, rsvp_deadline, allow_plus_ones, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
-            input.title,
-            input.hosts,
-            input.description,
-            input.cover_image,
-            input.location,
-            input.location_url,
-            input.starts_at,
-            input.rsvp_deadline,
-            i64::from(input.allow_plus_ones),
-            now(),
-        ],
-    )?;
-    Ok(conn.last_insert_rowid())
+pub async fn create_event<C: GenericClient>(client: &C, input: &EventInput) -> Result<i64, String> {
+    let row = client
+        .query_one(
+            "INSERT INTO events (title, hosts, description, cover_image, location, location_url,
+                                 starts_at, rsvp_deadline, allow_plus_ones, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+            &[
+                &input.title,
+                &input.hosts,
+                &input.description,
+                &input.cover_image,
+                &input.location,
+                &input.location_url,
+                &input.starts_at,
+                &input.rsvp_deadline,
+                &input.allow_plus_ones,
+                &now(),
+            ],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(row.get(0))
 }
 
-pub fn update_event(conn: &Connection, id: i64, input: &EventInput) -> rusqlite::Result<usize> {
-    conn.execute(
-        "UPDATE events SET title = ?1, hosts = ?2, description = ?3, cover_image = ?4,
-                           location = ?5, location_url = ?6, starts_at = ?7,
-                           rsvp_deadline = ?8, allow_plus_ones = ?9
-         WHERE id = ?10",
-        params![
-            input.title,
-            input.hosts,
-            input.description,
-            input.cover_image,
-            input.location,
-            input.location_url,
-            input.starts_at,
-            input.rsvp_deadline,
-            i64::from(input.allow_plus_ones),
-            id,
-        ],
-    )
+pub async fn update_event<C: GenericClient>(
+    client: &C,
+    id: i64,
+    input: &EventInput,
+) -> Result<u64, String> {
+    client
+        .execute(
+            "UPDATE events SET title = $1, hosts = $2, description = $3, cover_image = $4,
+                               location = $5, location_url = $6, starts_at = $7,
+                               rsvp_deadline = $8, allow_plus_ones = $9
+             WHERE id = $10",
+            &[
+                &input.title,
+                &input.hosts,
+                &input.description,
+                &input.cover_image,
+                &input.location,
+                &input.location_url,
+                &input.starts_at,
+                &input.rsvp_deadline,
+                &input.allow_plus_ones,
+                &id,
+            ],
+        )
+        .await
+        .map_err(|e| e.to_string())
 }
 
-pub fn delete_event(conn: &Connection, id: i64) -> rusqlite::Result<usize> {
-    conn.execute("DELETE FROM events WHERE id = ?1", params![id])
+pub async fn delete_event<C: GenericClient>(client: &C, id: i64) -> Result<u64, String> {
+    client
+        .execute("DELETE FROM events WHERE id = $1", &[&id])
+        .await
+        .map_err(|e| e.to_string())
 }
 
-pub fn event_title(conn: &Connection, id: i64) -> rusqlite::Result<Option<String>> {
-    conn.query_row("SELECT title FROM events WHERE id = ?1", params![id], |r| {
-        r.get(0)
-    })
-    .optional()
+pub async fn event_title<C: GenericClient>(client: &C, id: i64) -> Result<Option<String>, String> {
+    let row = client
+        .query_opt("SELECT title FROM events WHERE id = $1", &[&id])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(row.map(|r| r.get(0)))
 }
 
 /// An event with its full guest list, for the event admin screen.
-pub fn event_admin_view(conn: &Connection, id: i64) -> rusqlite::Result<Option<EventAdminView>> {
-    let event = conn
-        .query_row(
-            &format!("SELECT {EVENT_FIELDS} FROM events WHERE id = ?1"),
-            params![id],
-            |row| event_from_row(row, 0),
+pub async fn event_admin_view<C: GenericClient>(
+    client: &C,
+    id: i64,
+) -> Result<Option<EventAdminView>, String> {
+    let row = client
+        .query_opt(
+            &format!("SELECT {EVENT_FIELDS} FROM events WHERE id = $1"),
+            &[&id],
         )
-        .optional()?;
-    let Some(event) = event else {
-        return Ok(None);
-    };
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(row) = row else { return Ok(None) };
     Ok(Some(EventAdminView {
         id,
-        event,
-        guests: list_guests(conn, id)?,
+        event: event_from_row(&row, 0),
+        guests: list_guests(client, id).await?,
     }))
 }
 
@@ -287,30 +345,38 @@ pub fn event_admin_view(conn: &Connection, id: i64) -> rusqlite::Result<Option<E
 // Guests
 // ---------------------------------------------------------------------------
 
-fn guest_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GuestDto> {
-    let status: String = row.get(4)?;
-    Ok(GuestDto {
-        id: row.get(0)?,
-        name: row.get(1)?,
-        token: row.get(2)?,
-        max_party_size: row.get(3)?,
-        status: Rsvp::from_db(&status),
-        party_size: row.get(5)?,
-        note: row.get(6)?,
-        responded_at: row.get(7)?,
-    })
-}
-
 const GUEST_FIELDS: &str =
     "id, name, token, max_party_size, status, party_size, note, responded_at";
 
-pub fn list_guests(conn: &Connection, event_id: i64) -> rusqlite::Result<Vec<GuestDto>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {GUEST_FIELDS} FROM guests WHERE event_id = ?1
-         ORDER BY name COLLATE NOCASE ASC, id ASC"
-    ))?;
-    let rows = stmt.query_map(params![event_id], guest_from_row)?;
-    rows.collect()
+fn guest_from_row(row: &tokio_postgres::Row) -> GuestDto {
+    let status: String = row.get(4);
+    GuestDto {
+        id: row.get(0),
+        name: row.get(1),
+        token: row.get(2),
+        max_party_size: row.get(3),
+        status: Rsvp::from_db(&status),
+        party_size: row.get(5),
+        note: row.get(6),
+        responded_at: row.get(7),
+    }
+}
+
+pub async fn list_guests<C: GenericClient>(
+    client: &C,
+    event_id: i64,
+) -> Result<Vec<GuestDto>, String> {
+    let rows = client
+        .query(
+            &format!(
+                "SELECT {GUEST_FIELDS} FROM guests WHERE event_id = $1
+                 ORDER BY lower(name) ASC, id ASC"
+            ),
+            &[&event_id],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows.iter().map(guest_from_row).collect())
 }
 
 /// Inserts guests in one transaction, skipping names already on this event's
@@ -318,73 +384,116 @@ pub fn list_guests(conn: &Connection, event_id: i64) -> rusqlite::Result<Vec<Gue
 ///
 /// `guests` carries `(name, max_party_size, token)`; tokens are generated by the
 /// caller so this module stays free of randomness concerns.
-pub fn add_guests(
-    conn: &mut Connection,
+pub async fn add_guests(
+    client: &mut deadpool_postgres::Object,
     event_id: i64,
     guests: &[(String, i64, String)],
-) -> rusqlite::Result<usize> {
-    let tx = conn.transaction()?;
+) -> Result<usize, String> {
+    let tx = client.transaction().await.map_err(|e| e.to_string())?;
+    let created = now();
     let mut added = 0usize;
-    {
-        let mut exists = tx.prepare(
-            "SELECT 1 FROM guests WHERE event_id = ?1 AND name = ?2 COLLATE NOCASE LIMIT 1",
-        )?;
-        let mut insert = tx.prepare(
-            "INSERT INTO guests (event_id, name, token, max_party_size, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-        )?;
-        let created = now();
-        for (name, max_party_size, token) in guests {
-            let already: Option<i64> = exists
-                .query_row(params![event_id, name], |r| r.get(0))
-                .optional()?;
-            if already.is_some() {
-                continue;
-            }
-            insert.execute(params![event_id, name, token, max_party_size, created])?;
-            added += 1;
-        }
+    for (name, max_party_size, token) in guests {
+        // The unique index on (event_id, lower(name)) is what actually
+        // guarantees this; DO NOTHING turns a re-paste into a no-op instead of
+        // an error, including when two admins paste at the same moment.
+        let n = tx
+            .execute(
+                "INSERT INTO guests (event_id, name, token, max_party_size, created_at)
+                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+                &[&event_id, name, token, max_party_size, &created],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        added += n as usize;
     }
-    tx.commit()?;
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(added)
 }
 
-pub fn update_guest(
-    conn: &Connection,
+pub async fn update_guest<C: GenericClient>(
+    client: &C,
     guest_id: i64,
     name: &str,
     max_party_size: i64,
-) -> rusqlite::Result<usize> {
-    conn.execute(
-        "UPDATE guests SET name = ?1, max_party_size = ?2 WHERE id = ?3",
-        params![name, max_party_size, guest_id],
-    )
+) -> Result<u64, String> {
+    client
+        .execute(
+            "UPDATE guests SET name = $1, max_party_size = $2 WHERE id = $3",
+            &[&name, &max_party_size, &guest_id],
+        )
+        .await
+        .map_err(|e| e.to_string())
 }
 
-pub fn delete_guest(conn: &Connection, guest_id: i64) -> rusqlite::Result<usize> {
-    conn.execute("DELETE FROM guests WHERE id = ?1", params![guest_id])
+pub async fn delete_guest<C: GenericClient>(client: &C, guest_id: i64) -> Result<u64, String> {
+    client
+        .execute("DELETE FROM guests WHERE id = $1", &[&guest_id])
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Clears a guest's answer so they can be asked again. The original reply stays
 /// in `rsvp_log`.
-pub fn reset_guest(conn: &Connection, guest_id: i64) -> rusqlite::Result<usize> {
-    conn.execute(
-        "UPDATE guests SET status = 'pending', party_size = 0, note = '', responded_at = ''
-         WHERE id = ?1",
-        params![guest_id],
-    )
+pub async fn reset_guest<C: GenericClient>(client: &C, guest_id: i64) -> Result<u64, String> {
+    client
+        .execute(
+            "UPDATE guests SET status = 'pending', party_size = 0, note = '', responded_at = ''
+             WHERE id = $1",
+            &[&guest_id],
+        )
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Rotates a guest's invitation link, invalidating the old one.
-pub fn reissue_guest_token(
-    conn: &Connection,
+pub async fn reissue_guest_token<C: GenericClient>(
+    client: &C,
     guest_id: i64,
     token: &str,
-) -> rusqlite::Result<usize> {
-    conn.execute(
-        "UPDATE guests SET token = ?1 WHERE id = ?2",
-        params![token, guest_id],
-    )
+) -> Result<u64, String> {
+    client
+        .execute(
+            "UPDATE guests SET token = $1 WHERE id = $2",
+            &[&token, &guest_id],
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Cover images
+// ---------------------------------------------------------------------------
+
+pub async fn store_cover<C: GenericClient>(
+    client: &C,
+    id: &str,
+    content_type: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    client
+        .execute(
+            "INSERT INTO cover_images (id, content_type, bytes, created_at)
+             VALUES ($1, $2, $3, $4)",
+            &[&id, &content_type, &bytes, &now()],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Returns `(content_type, bytes)` for a stored cover image.
+pub async fn load_cover<C: GenericClient>(
+    client: &C,
+    id: &str,
+) -> Result<Option<(String, Vec<u8>)>, String> {
+    let row = client
+        .query_opt(
+            "SELECT content_type, bytes FROM cover_images WHERE id = $1",
+            &[&id],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(row.map(|r| (r.get(0), r.get(1))))
 }
 
 // ---------------------------------------------------------------------------
@@ -394,42 +503,42 @@ pub fn reissue_guest_token(
 /// Resolves a guest token into the invitation page's render model.
 ///
 /// Returns `(guest_id, event_id, view)`.
-pub fn invite_by_token(
-    conn: &Connection,
+pub async fn invite_by_token<C: GenericClient>(
+    client: &C,
     token: &str,
-) -> rusqlite::Result<Option<(i64, i64, InviteView)>> {
-    conn.query_row(
-        &format!(
-            "SELECT g.id, g.event_id, g.name, g.max_party_size, g.status, g.party_size, g.note,
-                    {}
-             FROM guests g JOIN events e ON e.id = g.event_id
-             WHERE g.token = ?1",
-            EVENT_FIELDS
-                .split(", ")
-                .map(|f| format!("e.{}", f.trim()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        params![token],
-        |row| {
-            let status: String = row.get(4)?;
-            let event = event_from_row(row, 7)?;
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                InviteView {
-                    guest_name: row.get(2)?,
-                    max_party_size: row.get(3)?,
-                    status: Rsvp::from_db(&status),
-                    party_size: row.get(5)?,
-                    note: row.get(6)?,
-                    event,
-                    closed: false,
-                },
-            ))
+) -> Result<Option<(i64, i64, InviteView)>, String> {
+    let columns = EVENT_FIELDS
+        .split(',')
+        .map(|f| format!("e.{}", f.trim()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let row = client
+        .query_opt(
+            &format!(
+                "SELECT g.id, g.event_id, g.name, g.max_party_size, g.status, g.party_size,
+                        g.note, {columns}
+                 FROM guests g JOIN events e ON e.id = g.event_id
+                 WHERE g.token = $1"
+            ),
+            &[&token],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(row) = row else { return Ok(None) };
+    let status: String = row.get(4);
+    Ok(Some((
+        row.get(0),
+        row.get(1),
+        InviteView {
+            guest_name: row.get(2),
+            max_party_size: row.get(3),
+            status: Rsvp::from_db(&status),
+            party_size: row.get(5),
+            note: row.get(6),
+            event: event_from_row(&row, 7),
+            closed: false,
         },
-    )
-    .optional()
+    )))
 }
 
 /// One guest's reply, as it is about to be written.
@@ -448,34 +557,42 @@ pub struct RsvpRecord {
 
 /// Records a guest's answer and appends it to the reply history, atomically:
 /// either both land or neither does.
-pub fn record_rsvp(conn: &mut Connection, reply: &RsvpRecord) -> rusqlite::Result<()> {
+pub async fn record_rsvp(
+    client: &mut deadpool_postgres::Object,
+    reply: &RsvpRecord,
+) -> Result<(), String> {
     let at = now();
-    let tx = conn.transaction()?;
+    let status = reply.status.as_str();
+    let tx = client.transaction().await.map_err(|e| e.to_string())?;
     tx.execute(
-        "UPDATE guests SET status = ?1, party_size = ?2, note = ?3, responded_at = ?4
-         WHERE id = ?5",
-        params![
-            reply.status.as_str(),
-            reply.party_size,
-            reply.note,
-            at,
-            reply.guest_id
+        "UPDATE guests SET status = $1, party_size = $2, note = $3, responded_at = $4
+         WHERE id = $5",
+        &[
+            &status,
+            &reply.party_size,
+            &reply.note,
+            &at,
+            &reply.guest_id,
         ],
-    )?;
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO rsvp_log (at, event_id, event_title, guest_id, guest_name,
                                status, party_size, note)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            at,
-            reply.event_id,
-            reply.event_title,
-            reply.guest_id,
-            reply.guest_name,
-            reply.status.as_str(),
-            reply.party_size,
-            reply.note
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        &[
+            &at,
+            &reply.event_id,
+            &reply.event_title,
+            &reply.guest_id,
+            &reply.guest_name,
+            &status,
+            &reply.party_size,
+            &reply.note,
         ],
-    )?;
-    tx.commit()
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())
 }

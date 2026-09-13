@@ -5,8 +5,12 @@
 //! — once for `wasm32-unknown-unknown` (`--features web`) and once natively
 //! (`--features server`) — so the page components and the DTOs are shared and can
 //! never drift apart.
+//!
+//! Nothing of consequence lives in the process or on its local disk: state is in
+//! PostgreSQL, which is what lets the deployment run more than one replica.
 
 mod api;
+mod i18n;
 mod types;
 mod ui;
 
@@ -23,6 +27,7 @@ mod export;
 mod tests;
 
 use dioxus::prelude::*;
+use i18n::Locale;
 use ui::{AdminEvent, AdminEvents, Home, Invite, NotFound};
 
 // ---------------------------------------------------------------------------
@@ -52,14 +57,29 @@ pub enum Route {
     NotFound { segments: Vec<String> },
 }
 
-/// Root component: global assets plus the router.
+/// Root component: the locale, the global assets, and the router.
 #[component]
 fn App() -> Element {
+    // Resolved through a server function rather than read on each side
+    // separately, and awaited before the first render: the server renders with
+    // this locale, and a client that hydrated with a different one would
+    // mismatch every string on the page.
+    let resolved = use_server_future(api::locale)?;
+    let locale = match &*resolved.read_unchecked() {
+        Some(Ok(locale)) => *locale,
+        _ => Locale::default(),
+    };
+    provide_context(locale);
+
     rsx! {
         document::Link { rel: "icon", href: asset!("/assets/favicon.ico") }
         document::Stylesheet { href: asset!("/assets/material.css") }
         document::Stylesheet { href: asset!("/assets/app.css") }
-        Router::<Route> {}
+        // `dir` is what the stylesheet's right-to-left rules key off, and what
+        // the browser uses to lay out mixed Hebrew and Latin text correctly.
+        div { class: "app-root", dir: locale.dir(), lang: locale.lang(),
+            Router::<Route> {}
+        }
     }
 }
 
@@ -67,25 +87,45 @@ fn App() -> Element {
 // Server entry point
 // ---------------------------------------------------------------------------
 
+/// Reports a fatal startup problem and exits. A replica that cannot serve must
+/// not linger in a half-working state.
+#[cfg(feature = "server")]
+fn fatal(message: &str) -> ! {
+    eprintln!("hainviter: {message}");
+    std::process::exit(1);
+}
+
 #[cfg(feature = "server")]
 #[tokio::main]
 async fn main() {
     use axum::routing::get;
     use dioxus::server::{DioxusRouterExt, ServeConfig};
 
-    let data = db::data_dir();
-    println!("hainviter: data directory is {}", data.display());
-    if let Err(e) = std::fs::create_dir_all(db::uploads_dir()) {
-        // Not fatal: only cover-image uploads need it, and failing here would
-        // take down an otherwise working invitation server.
-        eprintln!(
-            "hainviter: WARNING could not create {}: {e}",
-            db::uploads_dir().display()
-        );
+    let url = db::database_url().unwrap_or_else(|e| fatal(&e));
+    // The URL carries a password, so it is never logged.
+    db::init(&url).await.unwrap_or_else(|e| fatal(&e));
+    println!("hainviter: connected to PostgreSQL");
+
+    let locale = i18n::from_env();
+    println!(
+        "hainviter: locale {} ({})",
+        locale.tag(),
+        locale.dir().to_uppercase()
+    );
+    match audit::log_path() {
+        Some(path) => println!("hainviter: audit log at {}", path.display()),
+        None => println!(
+            "hainviter: audit log goes to stdout only (HAINVITER_DATA_DIR is unset); \
+             replies are also kept in the database"
+        ),
     }
-    db::init(&db::db_path()).expect("failed to open the database");
-    println!("hainviter: database ready at {}", db::db_path().display());
-    println!("hainviter: audit log at {}", audit::log_path().display());
+
+    // Settled before the listener opens, so no request can arrive while the
+    // admin token is still empty.
+    {
+        let client = db::client().await.unwrap_or_else(|e| fatal(&e));
+        auth::resolve(&**client).await.unwrap_or_else(|e| fatal(&e));
+    }
 
     let base = std::env::var("HAINVITER_BASE_URL").unwrap_or_default();
     let origin = if base.trim().is_empty() {
@@ -106,14 +146,14 @@ async fn main() {
         "server_started",
         serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
-            "data_dir": data.display().to_string(),
+            "locale": locale.tag(),
             "base_url": base,
         }),
     );
 
     let addr = dioxus::cli_config::fullstack_address_or_localhost();
     let router = axum::Router::new()
-        // Uploaded cover images, served straight off the data volume.
+        // Uploaded cover images, served out of the database.
         .route("/uploads/{name}", get(serve_upload))
         // CSV download. A plain GET (rather than a server function) so the
         // browser saves a properly named file.
@@ -125,12 +165,12 @@ async fn main() {
         .into_make_service();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .unwrap_or_else(|e| panic!("cannot bind {addr}: {e}"));
+        .unwrap_or_else(|e| fatal(&format!("cannot bind {addr}: {e}")));
     println!("hainviter: listening on http://{addr}");
     axum::serve(listener, router).await.unwrap();
 }
 
-/// Serves one uploaded cover image.
+/// Serves one uploaded cover image out of the database.
 #[cfg(feature = "server")]
 async fn serve_upload(
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -141,36 +181,41 @@ async fn serve_upload(
     };
 
     // Stored names are generated by us and are always `<32 hex>.<ext>`; anything
-    // else is either a mistake or an attempt to walk out of the directory.
+    // else is either a mistake or someone probing.
     let valid = !name.is_empty()
         && name.len() <= 64
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
-        && !name.contains("..");
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
     if !valid {
         return (StatusCode::BAD_REQUEST, "bad file name").into_response();
     }
 
-    let mime = match name.rsplit_once('.').map(|(_, e)| e) {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        _ => return (StatusCode::BAD_REQUEST, "unsupported file type").into_response(),
+    let client = match db::client().await {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("uploads: {e}");
+            return (StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response();
+        }
     };
-
-    match tokio::fs::read(db::uploads_dir().join(&name)).await {
-        Ok(bytes) => (
+    match db::load_cover(&**client, &name).await {
+        Ok(Some((content_type, bytes))) => (
             [
-                (header::CONTENT_TYPE, mime),
-                // File names are random, so a stored image never changes.
-                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+                (header::CONTENT_TYPE, content_type),
+                // Ids are random, so a stored image never changes.
+                (
+                    header::CACHE_CONTROL,
+                    "public, max-age=31536000, immutable".to_owned(),
+                ),
             ],
             bytes,
         )
             .into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(e) => {
+            eprintln!("uploads: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "failed").into_response()
+        }
     }
 }
 
@@ -190,8 +235,15 @@ async fn export_csv(
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
 
-    let view = match db::with_db(move |c| db::event_admin_view(c, event_id)).await {
-        Ok(Some(v)) => v,
+    let client = match db::client().await {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("export: {e}");
+            return (StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response();
+        }
+    };
+    let view = match db::event_admin_view(&**client, event_id).await {
+        Ok(Some(view)) => view,
         Ok(None) => return (StatusCode::NOT_FOUND, "no such event").into_response(),
         Err(e) => {
             eprintln!("export: {e}");

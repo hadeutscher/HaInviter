@@ -17,6 +17,23 @@ jobs:
   check:
     runs-on: ubuntu-24.04-arm
 
+    # The end-to-end test drops and recreates this database's schema, so it gets
+    # one of its own rather than the variable the application reads.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: hainviter_test
+          POSTGRES_USER: hainviter
+          POSTGRES_PASSWORD: hainviter
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hainviter -d hainviter_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -42,4 +59,9 @@ jobs:
         run: cargo check --features web --target wasm32-unknown-unknown
 
       - name: Test
+        env:
+          HAINVITER_TEST_DATABASE_URL: postgres://hainviter:hainviter@localhost:5432/hainviter_test
+          # Turns a broken database service into a failure rather than a
+          # silently skipped end-to-end test.
+          HAINVITER_REQUIRE_DB: "1"
         run: cargo test --features server --no-fail-fast

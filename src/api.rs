@@ -8,12 +8,20 @@
 //! Only the signatures of these functions are compiled into the WASM bundle; the
 //! bodies exist on the server alone.
 
-use crate::types::{EventAdminView, EventInput, EventSummary, InviteView, RsvpSubmission};
+use crate::{
+    i18n::Locale,
+    types::{EventAdminView, EventInput, EventSummary, InviteView, RsvpSubmission},
+};
 use dioxus::prelude::*;
 
 /// Largest cover image we accept, in bytes.
+pub const MAX_COVER_BYTES: usize = 8 * 1024 * 1024;
+
+/// The active locale's strings, for messages that reach the user.
 #[cfg(feature = "server")]
-const MAX_COVER_BYTES: usize = 8 * 1024 * 1024;
+fn s() -> &'static crate::i18n::Strings {
+    crate::i18n::from_env().strings()
+}
 
 /// Rejects anything that is not the admin token.
 #[cfg(feature = "server")]
@@ -22,17 +30,32 @@ fn guard(token: &str) -> Result<(), ServerFnError> {
         Ok(())
     } else {
         // Deliberately vague: the caller either has the link or does not.
-        Err(ServerFnError::new("not authorised"))
+        Err(ServerFnError::new(s().err_not_authorised))
     }
+}
+
+/// Checks out a database connection, as a `ServerFnError` on failure.
+#[cfg(feature = "server")]
+async fn conn() -> Result<deadpool_postgres::Object, ServerFnError> {
+    crate::db::client().await.map_err(ServerFnError::new)
 }
 
 // ---------------------------------------------------------------------------
 // Public
 // ---------------------------------------------------------------------------
 
+/// The locale this deployment serves.
+///
+/// The client needs it before its first render, or server-rendered markup and
+/// the hydrated client would disagree on every string.
+#[server(endpoint = "locale")]
+pub async fn locale() -> Result<Locale, ServerFnError> {
+    Ok(crate::i18n::from_env())
+}
+
 /// The externally reachable origin (e.g. `https://invites.example.com`), used to
 /// build shareable invitation links. Empty when `HAINVITER_BASE_URL` is unset, in
-/// which case the browser's own origin is used instead.
+/// which case the admin panel uses the browser's own origin instead.
 #[server(endpoint = "base_url")]
 pub async fn base_url() -> Result<String, ServerFnError> {
     Ok(std::env::var("HAINVITER_BASE_URL")
@@ -48,7 +71,8 @@ pub async fn base_url() -> Result<String, ServerFnError> {
 #[server(endpoint = "list_events")]
 pub async fn list_events(token: String) -> Result<Vec<EventSummary>, ServerFnError> {
     guard(&token)?;
-    crate::db::with_db(|c| crate::db::list_events(c))
+    let client = conn().await?;
+    crate::db::list_events(&**client)
         .await
         .map_err(ServerFnError::new)
 }
@@ -58,15 +82,15 @@ pub async fn create_event(token: String, input: EventInput) -> Result<i64, Serve
     guard(&token)?;
     let input = sanitise(input);
     if input.title.is_empty() {
-        return Err(ServerFnError::new("an event needs a title"));
+        return Err(ServerFnError::new(s().err_event_needs_title));
     }
-    let title = input.title.clone();
-    let id = crate::db::with_db(move |c| crate::db::create_event(c, &input))
+    let client = conn().await?;
+    let id = crate::db::create_event(&**client, &input)
         .await
         .map_err(ServerFnError::new)?;
     crate::audit::record(
         "event_created",
-        serde_json::json!({ "event_id": id, "title": title }),
+        serde_json::json!({ "event_id": id, "title": input.title }),
     );
     Ok(id)
 }
@@ -76,18 +100,18 @@ pub async fn update_event(token: String, id: i64, input: EventInput) -> Result<(
     guard(&token)?;
     let input = sanitise(input);
     if input.title.is_empty() {
-        return Err(ServerFnError::new("an event needs a title"));
+        return Err(ServerFnError::new(s().err_event_needs_title));
     }
-    let title = input.title.clone();
-    let changed = crate::db::with_db(move |c| crate::db::update_event(c, id, &input))
+    let client = conn().await?;
+    let changed = crate::db::update_event(&**client, id, &input)
         .await
         .map_err(ServerFnError::new)?;
     if changed == 0 {
-        return Err(ServerFnError::new("no such event"));
+        return Err(ServerFnError::new(s().err_no_such_event));
     }
     crate::audit::record(
         "event_updated",
-        serde_json::json!({ "event_id": id, "title": title }),
+        serde_json::json!({ "event_id": id, "title": input.title }),
     );
     Ok(())
 }
@@ -95,16 +119,18 @@ pub async fn update_event(token: String, id: i64, input: EventInput) -> Result<(
 #[server(endpoint = "delete_event")]
 pub async fn delete_event(token: String, id: i64) -> Result<(), ServerFnError> {
     guard(&token)?;
-    // Read the title first so the audit trail says what was removed. Guests
-    // cascade away with the event, but their replies stay in `rsvp_log`.
-    let title = crate::db::with_db(move |c| crate::db::event_title(c, id))
+    let client = conn().await?;
+    // Read the title and guest list first so the audit trail says what was
+    // removed. Guests cascade away with the event, but their replies stay in
+    // `rsvp_log`.
+    let title = crate::db::event_title(&**client, id)
         .await
         .map_err(ServerFnError::new)?
         .unwrap_or_else(|| "<unknown>".to_owned());
-    let guests = crate::db::with_db(move |c| crate::db::list_guests(c, id))
+    let guests = crate::db::list_guests(&**client, id)
         .await
         .map_err(ServerFnError::new)?;
-    crate::db::with_db(move |c| crate::db::delete_event(c, id))
+    crate::db::delete_event(&**client, id)
         .await
         .map_err(ServerFnError::new)?;
     crate::audit::record(
@@ -122,10 +148,11 @@ pub async fn delete_event(token: String, id: i64) -> Result<(), ServerFnError> {
 #[server(endpoint = "get_event")]
 pub async fn get_event(token: String, id: i64) -> Result<EventAdminView, ServerFnError> {
     guard(&token)?;
-    crate::db::with_db(move |c| crate::db::event_admin_view(c, id))
+    let client = conn().await?;
+    crate::db::event_admin_view(&**client, id)
         .await
         .map_err(ServerFnError::new)?
-        .ok_or_else(|| ServerFnError::new("no such event"))
+        .ok_or_else(|| ServerFnError::new(s().err_no_such_event))
 }
 
 // ---------------------------------------------------------------------------
@@ -146,14 +173,15 @@ pub async fn add_guests(
     guard(&token)?;
     let parsed = crate::types::parse_guest_list(&raw, default_party_size.clamp(1, 50));
     if parsed.is_empty() {
-        return Err(ServerFnError::new("no names found in that list"));
+        return Err(ServerFnError::new(s().err_no_names));
     }
     let rows: Vec<(String, i64, String)> = parsed
         .into_iter()
         .map(|(name, size)| (name, size, crate::auth::new_token()))
         .collect();
-    let names: Vec<String> = rows.iter().map(|(n, _, _)| n.clone()).collect();
-    let added = crate::db::with_db(move |c| crate::db::add_guests(c, event_id, &rows))
+    let names: Vec<&String> = rows.iter().map(|(n, _, _)| n).collect();
+    let mut client = conn().await?;
+    let added = crate::db::add_guests(&mut client, event_id, &rows)
         .await
         .map_err(ServerFnError::new)?;
     crate::audit::record(
@@ -173,16 +201,16 @@ pub async fn update_guest(
     guard(&token)?;
     let name = name.trim().to_owned();
     if name.is_empty() {
-        return Err(ServerFnError::new("a guest needs a name"));
+        return Err(ServerFnError::new(s().err_guest_needs_name));
     }
     let max_party_size = max_party_size.clamp(1, 50);
-    let logged = name.clone();
-    crate::db::with_db(move |c| crate::db::update_guest(c, guest_id, &name, max_party_size))
+    let client = conn().await?;
+    crate::db::update_guest(&**client, guest_id, &name, max_party_size)
         .await
         .map_err(ServerFnError::new)?;
     crate::audit::record(
         "guest_updated",
-        serde_json::json!({ "guest_id": guest_id, "name": logged, "max_party_size": max_party_size }),
+        serde_json::json!({ "guest_id": guest_id, "name": name, "max_party_size": max_party_size }),
     );
     Ok(())
 }
@@ -190,7 +218,8 @@ pub async fn update_guest(
 #[server(endpoint = "delete_guest")]
 pub async fn delete_guest(token: String, guest_id: i64) -> Result<(), ServerFnError> {
     guard(&token)?;
-    crate::db::with_db(move |c| crate::db::delete_guest(c, guest_id))
+    let client = conn().await?;
+    crate::db::delete_guest(&**client, guest_id)
         .await
         .map_err(ServerFnError::new)?;
     crate::audit::record("guest_deleted", serde_json::json!({ "guest_id": guest_id }));
@@ -202,7 +231,8 @@ pub async fn delete_guest(token: String, guest_id: i64) -> Result<(), ServerFnEr
 #[server(endpoint = "reset_guest")]
 pub async fn reset_guest(token: String, guest_id: i64) -> Result<(), ServerFnError> {
     guard(&token)?;
-    crate::db::with_db(move |c| crate::db::reset_guest(c, guest_id))
+    let client = conn().await?;
+    crate::db::reset_guest(&**client, guest_id)
         .await
         .map_err(ServerFnError::new)?;
     crate::audit::record("guest_reset", serde_json::json!({ "guest_id": guest_id }));
@@ -214,12 +244,12 @@ pub async fn reset_guest(token: String, guest_id: i64) -> Result<(), ServerFnErr
 pub async fn reissue_invite(token: String, guest_id: i64) -> Result<String, ServerFnError> {
     guard(&token)?;
     let fresh = crate::auth::new_token();
-    let stored = fresh.clone();
-    let changed = crate::db::with_db(move |c| crate::db::reissue_guest_token(c, guest_id, &stored))
+    let client = conn().await?;
+    let changed = crate::db::reissue_guest_token(&**client, guest_id, &fresh)
         .await
         .map_err(ServerFnError::new)?;
     if changed == 0 {
-        return Err(ServerFnError::new("no such guest"));
+        return Err(ServerFnError::new(s().err_no_such_guest));
     }
     crate::audit::record(
         "guest_link_reissued",
@@ -232,12 +262,12 @@ pub async fn reissue_invite(token: String, guest_id: i64) -> Result<String, Serv
 // Cover images
 // ---------------------------------------------------------------------------
 
-/// Stores an uploaded cover image on the data volume and returns the path to
-/// serve it from (`/uploads/…`).
+/// Stores an uploaded cover image and returns the path to serve it from
+/// (`/uploads/…`).
 ///
-/// The file type comes from the bytes themselves, never from the supplied file
-/// name, and the stored name is random — an upload can neither overwrite an
-/// existing file nor escape the uploads directory.
+/// The bytes go into the database rather than onto local disk, so every replica
+/// can serve the image and no shared filesystem is needed. The file type comes
+/// from the bytes themselves, never from the supplied file name.
 #[server(endpoint = "upload_cover")]
 pub async fn upload_cover(
     token: String,
@@ -246,52 +276,52 @@ pub async fn upload_cover(
 ) -> Result<String, ServerFnError> {
     guard(&token)?;
     if bytes.is_empty() {
-        return Err(ServerFnError::new("that file is empty"));
+        return Err(ServerFnError::new(s().err_file_empty));
     }
     if bytes.len() > MAX_COVER_BYTES {
-        return Err(ServerFnError::new(format!(
-            "cover images must be under {} MB",
-            MAX_COVER_BYTES / (1024 * 1024)
-        )));
+        return Err(ServerFnError::new(
+            s().field_cover_too_large
+                .replace("{}", &(MAX_COVER_BYTES / (1024 * 1024)).to_string()),
+        ));
     }
-    let ext = sniff_image(&bytes)
-        .ok_or_else(|| ServerFnError::new("that does not look like a JPEG, PNG, GIF or WebP"))?;
+    let (ext, content_type) =
+        sniff_image(&bytes).ok_or_else(|| ServerFnError::new(s().err_not_an_image))?;
 
-    let dir = crate::db::uploads_dir();
+    // The stored id is random, so an upload can neither overwrite an existing
+    // image nor be guessed from the outside.
     let name = format!("{}.{ext}", crate::auth::new_token());
-    let path = dir.join(&name);
-    let size = bytes.len();
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(&path, &bytes)
-    })
-    .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?
-    .map_err(|e| ServerFnError::new(format!("could not store the image: {e}")))?;
+    let client = conn().await?;
+    crate::db::store_cover(&**client, &name, content_type, &bytes)
+        .await
+        .map_err(|e| ServerFnError::new(format!("{}: {e}", s().err_store_failed)))?;
 
     crate::audit::record(
         "cover_uploaded",
-        serde_json::json!({ "stored_as": name, "original_name": filename, "bytes": size }),
+        serde_json::json!({
+            "stored_as": name,
+            "original_name": filename,
+            "bytes": bytes.len(),
+        }),
     );
     Ok(format!("/uploads/{name}"))
 }
 
-/// Identifies an image from its magic bytes, returning the extension to store it
-/// under. Anything unrecognised is rejected by the caller.
+/// Identifies an image from its magic bytes, returning `(extension, MIME type)`.
+/// Anything unrecognised is rejected by the caller.
 #[cfg(feature = "server")]
-fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+fn sniff_image(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
     const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
     if bytes.starts_with(PNG) {
-        return Some("png");
+        return Some(("png", "image/png"));
     }
     if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        return Some("jpg");
+        return Some(("jpg", "image/jpeg"));
     }
     if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return Some("gif");
+        return Some(("gif", "image/gif"));
     }
     if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        return Some("webp");
+        return Some(("webp", "image/webp"));
     }
     None
 }
@@ -303,10 +333,11 @@ fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
 /// Resolves a guest's personal token into their invitation.
 #[server(endpoint = "get_invite")]
 pub async fn get_invite(guest_token: String) -> Result<InviteView, ServerFnError> {
-    let found = crate::db::with_db(move |c| crate::db::invite_by_token(c, &guest_token))
+    let client = conn().await?;
+    let found = crate::db::invite_by_token(&**client, &guest_token)
         .await
         .map_err(ServerFnError::new)?;
-    let (_, _, mut view) = found.ok_or_else(|| ServerFnError::new("invitation not found"))?;
+    let (_, _, mut view) = found.ok_or_else(|| ServerFnError::new(s().err_invite_not_found))?;
     view.closed = rsvp_closed(&view.event.rsvp_deadline);
     Ok(view)
 }
@@ -320,17 +351,15 @@ pub async fn submit_rsvp(
 ) -> Result<InviteView, ServerFnError> {
     use crate::types::Rsvp;
 
-    let lookup = guest_token.clone();
-    let found = crate::db::with_db(move |c| crate::db::invite_by_token(c, &lookup))
+    let mut client = conn().await?;
+    let found = crate::db::invite_by_token(&**client, &guest_token)
         .await
         .map_err(ServerFnError::new)?;
     let (guest_id, event_id, view) =
-        found.ok_or_else(|| ServerFnError::new("invitation not found"))?;
+        found.ok_or_else(|| ServerFnError::new(s().err_invite_not_found))?;
 
     if rsvp_closed(&view.event.rsvp_deadline) {
-        return Err(ServerFnError::new(
-            "replies for this event have closed — please contact the hosts directly",
-        ));
+        return Err(ServerFnError::new(s().err_replies_closed));
     }
 
     let status = if submission.attending {
@@ -354,20 +383,18 @@ pub async fn submit_rsvp(
         party_size,
         note: note.clone(),
     };
-    let title = reply.event_title.clone();
-    let name = reply.guest_name.clone();
-    crate::db::with_db(move |c| crate::db::record_rsvp(c, &reply))
+    crate::db::record_rsvp(&mut client, &reply)
         .await
         .map_err(ServerFnError::new)?;
 
     // Printed as well as recorded: a reply must be recoverable from container
-    // logs alone, even if the volume were lost.
+    // logs alone, even if everything else were lost.
     println!(
-        "rsvp {} ({}) for event {} \"{}\": {} party={} note={:?}",
-        name,
+        "rsvp {} ({}) for event {} {:?}: {} party={} note={:?}",
+        reply.guest_name,
         guest_id,
         event_id,
-        title,
+        reply.event_title,
         status.as_str(),
         party_size,
         note
@@ -376,19 +403,19 @@ pub async fn submit_rsvp(
         "rsvp",
         serde_json::json!({
             "event_id": event_id,
-            "event_title": title,
+            "event_title": reply.event_title,
             "guest_id": guest_id,
-            "guest_name": name,
+            "guest_name": reply.guest_name,
             "status": status.as_str(),
             "party_size": party_size,
             "note": note,
         }),
     );
 
-    let refreshed = crate::db::with_db(move |c| crate::db::invite_by_token(c, &guest_token))
+    let refreshed = crate::db::invite_by_token(&**client, &guest_token)
         .await
         .map_err(ServerFnError::new)?;
-    let (_, _, mut view) = refreshed.ok_or_else(|| ServerFnError::new("invitation not found"))?;
+    let (_, _, mut view) = refreshed.ok_or_else(|| ServerFnError::new(s().err_invite_not_found))?;
     view.closed = rsvp_closed(&view.event.rsvp_deadline);
     Ok(view)
 }

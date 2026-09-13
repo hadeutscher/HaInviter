@@ -2,10 +2,15 @@
 //!
 //! Losing guest replies is the worst thing this system could do, so every reply
 //! is written in three independent places: the `guests` row, the append-only
-//! `rsvp_log` table, and — here — a JSON-lines file on the data volume plus a
-//! line on stdout for whatever collects container logs.
+//! `rsvp_log` table, and a line on stdout for whatever collects container logs.
+//! When `HAINVITER_DATA_DIR` is set there is a fourth: a JSON-lines file on that
+//! directory.
+//!
+//! The file is deliberately optional. With more than one replica the database
+//! and stdout are the copies that are guaranteed complete, and several pods
+//! appending to one shared file would interleave; give each pod its own
+//! directory or leave the variable unset.
 
-use crate::db;
 use std::{
     fs::OpenOptions,
     io::Write,
@@ -19,9 +24,16 @@ fn write_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-/// Path of the append-only audit log on the data volume.
-pub fn log_path() -> PathBuf {
-    db::data_dir().join("audit.log")
+/// Directory for the optional audit-log file, or `None` when unset.
+pub fn log_dir() -> Option<PathBuf> {
+    std::env::var_os("HAINVITER_DATA_DIR")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Path of the audit-log file, when one is configured.
+pub fn log_path() -> Option<PathBuf> {
+    log_dir().map(|d| d.join("audit.log"))
 }
 
 /// Appends one event to the audit log and echoes it to stdout.
@@ -31,7 +43,7 @@ pub fn log_path() -> PathBuf {
 /// request at that point would be a lie.
 pub fn record(kind: &str, detail: serde_json::Value) {
     let line = serde_json::json!({
-        "at": db::now(),
+        "at": crate::db::now(),
         "kind": kind,
         "detail": detail,
     });
@@ -39,7 +51,7 @@ pub fn record(kind: &str, detail: serde_json::Value) {
 
     println!("audit {rendered}");
 
-    let path = log_path();
+    let Some(path) = log_path() else { return };
     let _guard = write_lock().lock();
     let result = OpenOptions::new()
         .create(true)

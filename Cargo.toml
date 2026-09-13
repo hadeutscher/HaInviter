@@ -18,24 +18,27 @@ web = ["dioxus/web"]
 server = [
     "dioxus/server",
     "dep:axum",
+    "dep:deadpool-postgres",
     "dep:getrandom",
-    "dep:rusqlite",
     "dep:serde_json",
     "dep:tokio",
+    "dep:tokio-postgres",
 ]
 
 [dependencies]
 axum = { version = "0.8", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "now"] }
+deadpool-postgres = { version = "0.14", default-features = false, features = [
+    "rt_tokio_1",
+], optional = true }
 dioxus = { version = "0.7", features = ["fullstack", "router"] }
 getrandom = { version = "0.3", optional = true }
-# `bundled` compiles SQLite from source: no libsqlite3 needed in the runtime
-# image, and the version is pinned to whatever we build against.
-rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
+# No TLS: the database is reached over the cluster's own network, and pulling in
+# a TLS stack for that would be the largest dependency in the tree.
+tokio-postgres = { version = "0.7", optional = true }
 tokio = { version = "1", default-features = false, features = [
-    "fs",
     "macros",
     "rt-multi-thread",
 ], optional = true }

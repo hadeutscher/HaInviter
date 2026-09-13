@@ -5,16 +5,40 @@ services:
     image: ghcr.io/hadeutscher/hainviter:latest
     build: .
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
+      HAINVITER_DATABASE_URL: postgres://hainviter:hainviter@postgres:5432/hainviter
       # The public origin, used for the invitation links shown in the admin
       # panel and written to the CSV export.
       HAINVITER_BASE_URL: ""
-      # Set this to keep one admin link across restarts. Leave it unset to get a
-      # fresh token printed to the log on every start.
+      # en-US or he-IL. he-IL renders the whole UI in Hebrew, right to left.
+      HAINVITER_LOCALE: en-US
+      # Set this to keep one admin link across restarts. Left unset, a token is
+      # generated once and kept in the database, so every replica agrees on it.
       # HAINVITER_ADMIN_TOKEN: ""
+      # Optional: where to keep a second copy of the audit log. Give each
+      # instance its own directory — never a shared one.
+      HAINVITER_DATA_DIR: /data
     volumes:
-      # The database, the audit log and uploaded cover images. Losing this
-      # directory means losing the guest list, so keep it on the host.
       - ./data:/data
+
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hainviter
+      POSTGRES_USER: hainviter
+      POSTGRES_PASSWORD: hainviter
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hainviter -d hainviter"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      # The guest list and every reply. Losing this directory is the one failure
+      # that cannot be recovered from — back it up.
+      - ./data/postgres:/var/lib/postgresql/data
