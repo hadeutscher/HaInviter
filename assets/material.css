@@ -1,0 +1,703 @@
+/* ==========================================================================
+   Material 3 — design tokens and components
+   --------------------------------------------------------------------------
+   A direct implementation of the Material 3 specification for the handful of
+   components HaInviter needs. No web fonts, no icon fonts, no JavaScript
+   component library: the invitation pages are opened on phones over mobile
+   data, and the server runs on a Raspberry Pi.
+   ========================================================================== */
+
+/* ---------- Colour: light scheme --------------------------------------- */
+
+:root {
+  color-scheme: light dark;
+
+  /* A rose-plum primary with a warm bronze accent — celebratory, and still a
+     proper Material tonal palette. */
+  --md-primary: #8e4a5e;
+  --md-on-primary: #ffffff;
+  --md-primary-container: #ffd9e1;
+  --md-on-primary-container: #3c0518;
+
+  --md-secondary: #75565c;
+  --md-on-secondary: #ffffff;
+  --md-secondary-container: #ffd9e0;
+  --md-on-secondary-container: #2c151a;
+
+  --md-tertiary: #7c5635;
+  --md-on-tertiary: #ffffff;
+  --md-tertiary-container: #ffdcc0;
+  --md-on-tertiary-container: #2c1600;
+
+  --md-error: #b3261e;
+  --md-on-error: #ffffff;
+  --md-error-container: #f9dedc;
+  --md-on-error-container: #410e0b;
+
+  /* Not a Material role, but "attending" needs to read as success. Built to
+     match the palette's chroma so it does not look bolted on. */
+  --md-success: #2c6b4f;
+  --md-on-success: #ffffff;
+  --md-success-container: #b8f0cf;
+  --md-on-success-container: #002111;
+
+  --md-surface: #fff8f7;
+  --md-on-surface: #22191b;
+  --md-surface-variant: #f2dde1;
+  --md-on-surface-variant: #514347;
+
+  --md-surface-container-lowest: #ffffff;
+  --md-surface-container-low: #fff0f2;
+  --md-surface-container: #fde9ec;
+  --md-surface-container-high: #f7e3e6;
+  --md-surface-container-highest: #f1dee1;
+
+  --md-inverse-surface: #382e30;
+  --md-inverse-on-surface: #ffedef;
+
+  --md-outline: #837377;
+  --md-outline-variant: #d5c2c6;
+  --md-scrim: 0 0 0;
+
+  /* ---------- Shape ---------- */
+  --md-shape-xs: 4px;
+  --md-shape-sm: 8px;
+  --md-shape-md: 12px;
+  --md-shape-lg: 16px;
+  --md-shape-xl: 28px;
+  --md-shape-full: 999px;
+
+  /* ---------- Elevation ---------- */
+  --md-elevation-1: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 3px 1px rgb(0 0 0 / 0.15);
+  --md-elevation-2: 0 1px 2px rgb(0 0 0 / 0.3), 0 2px 6px 2px rgb(0 0 0 / 0.15);
+  --md-elevation-3: 0 1px 3px rgb(0 0 0 / 0.3), 0 4px 8px 3px rgb(0 0 0 / 0.15);
+  --md-elevation-4: 0 2px 3px rgb(0 0 0 / 0.3), 0 6px 10px 4px rgb(0 0 0 / 0.15);
+
+  /* ---------- Typeface ---------- */
+  --md-font-plain: Roboto, "Segoe UI", system-ui, -apple-system, "Helvetica Neue",
+    Arial, sans-serif;
+  /* Brand font for invitation headings; resolved from what the device already
+     has rather than downloaded. */
+  --md-font-brand: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia,
+    "Times New Roman", serif;
+
+  /* ---------- Motion ---------- */
+  --md-easing-standard: cubic-bezier(0.2, 0, 0, 1);
+  --md-easing-emphasised: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --md-duration-short: 150ms;
+  --md-duration-medium: 250ms;
+}
+
+/* ---------- Colour: dark scheme ---------------------------------------- */
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --md-primary: #ffb1c3;
+    --md-on-primary: #5b1b2f;
+    --md-primary-container: #763345;
+    --md-on-primary-container: #ffd9e1;
+
+    --md-secondary: #e4bdc3;
+    --md-on-secondary: #43292f;
+    --md-secondary-container: #5b3f45;
+    --md-on-secondary-container: #ffd9e0;
+
+    --md-tertiary: #eebd92;
+    --md-on-tertiary: #47290b;
+    --md-tertiary-container: #613f20;
+    --md-on-tertiary-container: #ffdcc0;
+
+    --md-error: #f2b8b5;
+    --md-on-error: #601410;
+    --md-error-container: #8c1d18;
+    --md-on-error-container: #f9dedc;
+
+    --md-success: #9cd5b1;
+    --md-on-success: #003921;
+    --md-success-container: #145232;
+    --md-on-success-container: #b8f0cf;
+
+    --md-surface: #191113;
+    --md-on-surface: #f1dee1;
+    --md-surface-variant: #514347;
+    --md-on-surface-variant: #d5c2c6;
+
+    --md-surface-container-lowest: #130c0e;
+    --md-surface-container-low: #22191b;
+    --md-surface-container: #261d1f;
+    --md-surface-container-high: #31272a;
+    --md-surface-container-highest: #3c3235;
+
+    --md-inverse-surface: #f1dee1;
+    --md-inverse-on-surface: #382e30;
+
+    --md-outline: #9f8c90;
+    --md-outline-variant: #514347;
+  }
+}
+
+/* ---------- Baseline --------------------------------------------------- */
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--md-surface);
+  color: var(--md-on-surface);
+  font-family: var(--md-font-plain);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 3px solid var(--md-primary);
+  outline-offset: 2px;
+}
+
+/* ---------- Typography scale ------------------------------------------- */
+
+.md-display-large { font-size: 3.5rem; line-height: 4rem; font-weight: 400; letter-spacing: -0.015em; }
+.md-display-medium { font-size: 2.8rem; line-height: 3.25rem; font-weight: 400; }
+.md-display-small { font-size: 2.25rem; line-height: 2.75rem; font-weight: 400; }
+.md-headline-large { font-size: 2rem; line-height: 2.5rem; font-weight: 400; }
+.md-headline-medium { font-size: 1.75rem; line-height: 2.25rem; font-weight: 400; }
+.md-headline-small { font-size: 1.5rem; line-height: 2rem; font-weight: 400; }
+.md-title-large { font-size: 1.375rem; line-height: 1.75rem; font-weight: 400; }
+.md-title-medium { font-size: 1rem; line-height: 1.5rem; font-weight: 500; letter-spacing: 0.009em; }
+.md-title-small { font-size: 0.875rem; line-height: 1.25rem; font-weight: 500; letter-spacing: 0.007em; }
+.md-body-large { font-size: 1rem; line-height: 1.5rem; letter-spacing: 0.031em; }
+.md-body-medium { font-size: 0.875rem; line-height: 1.25rem; letter-spacing: 0.017em; }
+.md-body-small { font-size: 0.75rem; line-height: 1rem; letter-spacing: 0.033em; }
+.md-label-large { font-size: 0.875rem; line-height: 1.25rem; font-weight: 500; letter-spacing: 0.007em; }
+.md-label-medium { font-size: 0.75rem; line-height: 1rem; font-weight: 500; letter-spacing: 0.042em; }
+.md-label-small { font-size: 0.6875rem; line-height: 1rem; font-weight: 500; letter-spacing: 0.045em; }
+
+.md-on-surface-variant { color: var(--md-on-surface-variant); }
+
+h1, h2, h3, h4 {
+  margin: 0;
+  font-weight: 400;
+}
+
+/* ---------- Icons ------------------------------------------------------ */
+
+.md-icon {
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  display: inline-block;
+  vertical-align: -0.2em;
+}
+
+/* ---------- Cards ------------------------------------------------------ */
+
+.md-card {
+  border-radius: var(--md-shape-lg);
+  padding: 1.25rem;
+  background: var(--md-surface-container-low);
+}
+
+.md-card--elevated {
+  background: var(--md-surface-container-lowest);
+  box-shadow: var(--md-elevation-1);
+}
+
+.md-card--filled {
+  background: var(--md-surface-container-high);
+}
+
+.md-card--outlined {
+  background: var(--md-surface);
+  border: 1px solid var(--md-outline-variant);
+}
+
+/* ---------- Buttons ---------------------------------------------------- */
+
+.md-button {
+  position: relative;
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 2.5rem;
+  padding: 0 1.5rem;
+  border: none;
+  border-radius: var(--md-shape-full);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  letter-spacing: 0.007em;
+  cursor: pointer;
+  overflow: hidden;
+  transition: box-shadow var(--md-duration-short) var(--md-easing-standard);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Material state layer: the same overlay mechanism for every variant. */
+.md-button::after,
+.md-icon-button::after,
+.md-fab::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+  opacity: 0;
+  transition: opacity var(--md-duration-short) var(--md-easing-standard);
+  pointer-events: none;
+}
+
+.md-button:hover::after,
+.md-icon-button:hover::after,
+.md-fab:hover::after { opacity: 0.08; }
+
+.md-button:active::after,
+.md-icon-button:active::after,
+.md-fab:active::after { opacity: 0.12; }
+
+.md-button--wide { width: 100%; }
+
+.md-button--filled {
+  background: var(--md-primary);
+  color: var(--md-on-primary);
+}
+
+.md-button--tonal {
+  background: var(--md-secondary-container);
+  color: var(--md-on-secondary-container);
+}
+
+.md-button--outlined {
+  background: transparent;
+  color: var(--md-primary);
+  border: 1px solid var(--md-outline);
+}
+
+.md-button--text {
+  background: transparent;
+  color: var(--md-primary);
+  padding: 0 0.75rem;
+}
+
+.md-button--danger {
+  background: var(--md-error-container);
+  color: var(--md-on-error-container);
+}
+
+.md-button:disabled {
+  cursor: not-allowed;
+  background: color-mix(in srgb, var(--md-on-surface) 12%, transparent);
+  color: color-mix(in srgb, var(--md-on-surface) 38%, transparent);
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.md-button:disabled::after { opacity: 0; }
+
+.md-icon-button {
+  position: relative;
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  padding: 0;
+  border: none;
+  border-radius: var(--md-shape-full);
+  background: transparent;
+  color: var(--md-on-surface-variant);
+  cursor: pointer;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.md-icon-button--danger { color: var(--md-error); }
+
+.md-icon-button:disabled {
+  color: color-mix(in srgb, var(--md-on-surface) 38%, transparent);
+  cursor: not-allowed;
+}
+
+.md-fab {
+  position: fixed;
+  right: max(1rem, env(safe-area-inset-right));
+  bottom: max(1rem, env(safe-area-inset-bottom));
+  z-index: 5;
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 3.5rem;
+  padding: 0 1.25rem;
+  border: none;
+  border-radius: var(--md-shape-lg);
+  background: var(--md-primary-container);
+  color: var(--md-on-primary-container);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  overflow: hidden;
+  box-shadow: var(--md-elevation-3);
+}
+
+.md-fab__label { white-space: nowrap; }
+
+/* ---------- Text fields ------------------------------------------------ */
+
+.md-field-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.md-field {
+  position: relative;
+  display: block;
+  background: var(--md-surface-container-highest);
+  border-radius: var(--md-shape-xs) var(--md-shape-xs) 0 0;
+  border-bottom: 1px solid var(--md-on-surface-variant);
+  transition: border-color var(--md-duration-short) var(--md-easing-standard);
+}
+
+.md-field:focus-within {
+  border-bottom: 2px solid var(--md-primary);
+}
+
+.md-field--error { border-bottom-color: var(--md-error); }
+
+.md-field__input {
+  width: 100%;
+  padding: 1.5rem 1rem 0.5rem;
+  border: none;
+  background: transparent;
+  color: var(--md-on-surface);
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1.5rem;
+  outline: none;
+}
+
+.md-field--multiline .md-field__input {
+  resize: vertical;
+  min-height: 4.5rem;
+  display: block;
+}
+
+.md-field--select .md-field__input {
+  appearance: none;
+  padding-right: 2.5rem;
+  cursor: pointer;
+}
+
+.md-field__trailing {
+  position: absolute;
+  right: 0.75rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--md-on-surface-variant);
+  pointer-events: none;
+}
+
+.md-field__label {
+  position: absolute;
+  left: 1rem;
+  top: 1rem;
+  color: var(--md-on-surface-variant);
+  font-size: 1rem;
+  line-height: 1.5rem;
+  pointer-events: none;
+  transform-origin: left top;
+  transition: transform var(--md-duration-short) var(--md-easing-standard),
+    color var(--md-duration-short) var(--md-easing-standard);
+}
+
+/* The label floats up once the field holds content or takes focus. Fields
+   whose control always shows something (dates, selects) keep it raised. */
+.md-field__input:focus ~ .md-field__label,
+.md-field__input:not(:placeholder-shown) ~ .md-field__label,
+.md-field--raised .md-field__label {
+  transform: translateY(-0.7rem) scale(0.75);
+}
+
+.md-field:focus-within .md-field__label { color: var(--md-primary); }
+.md-field--error .md-field__label { color: var(--md-error); }
+
+.md-field__supporting {
+  padding: 0 1rem;
+  color: var(--md-on-surface-variant);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+/* ---------- Switch ----------------------------------------------------- */
+
+.md-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.md-switch__input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.md-switch__track {
+  flex: none;
+  position: relative;
+  width: 3.25rem;
+  height: 2rem;
+  border-radius: var(--md-shape-full);
+  background: var(--md-surface-container-highest);
+  border: 2px solid var(--md-outline);
+  transition: background var(--md-duration-short) var(--md-easing-standard),
+    border-color var(--md-duration-short) var(--md-easing-standard);
+}
+
+.md-switch__handle {
+  position: absolute;
+  top: 50%;
+  left: 0.375rem;
+  width: 1rem;
+  height: 1rem;
+  border-radius: var(--md-shape-full);
+  background: var(--md-outline);
+  transform: translateY(-50%);
+  transition: all var(--md-duration-short) var(--md-easing-emphasised);
+}
+
+.md-switch__input:checked ~ .md-switch__track {
+  background: var(--md-primary);
+  border-color: var(--md-primary);
+}
+
+.md-switch__input:checked ~ .md-switch__track .md-switch__handle {
+  left: 1.5rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  background: var(--md-on-primary);
+}
+
+.md-switch__input:focus-visible ~ .md-switch__track {
+  outline: 3px solid var(--md-primary);
+  outline-offset: 2px;
+}
+
+.md-switch__label { font-size: 0.875rem; }
+
+/* ---------- Chips ------------------------------------------------------ */
+
+.md-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  height: 1.75rem;
+  padding: 0 0.75rem;
+  border-radius: var(--md-shape-sm);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.042em;
+  white-space: nowrap;
+}
+
+.md-chip__icon { width: 1rem; height: 1rem; }
+
+.md-chip--neutral { background: var(--md-surface-container-highest); color: var(--md-on-surface-variant); }
+.md-chip--primary { background: var(--md-primary-container); color: var(--md-on-primary-container); }
+.md-chip--positive { background: var(--md-success-container); color: var(--md-on-success-container); }
+.md-chip--negative { background: var(--md-error-container); color: var(--md-on-error-container); }
+.md-chip--waiting { background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); }
+
+/* ---------- Stat tiles ------------------------------------------------- */
+
+.md-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  padding: 0.75rem 1rem;
+  border-radius: var(--md-shape-md);
+  background: var(--md-surface-container-highest);
+  color: var(--md-on-surface-variant);
+  min-width: 5.5rem;
+}
+
+.md-stat--primary { background: var(--md-primary-container); color: var(--md-on-primary-container); }
+.md-stat--positive { background: var(--md-success-container); color: var(--md-on-success-container); }
+.md-stat--negative { background: var(--md-error-container); color: var(--md-on-error-container); }
+.md-stat--waiting { background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); }
+
+.md-stat__value { font-size: 1.75rem; line-height: 2rem; font-weight: 400; }
+.md-stat__caption { font-size: 0.6875rem; font-weight: 500; letter-spacing: 0.045em; text-transform: uppercase; }
+
+/* ---------- Dialog ----------------------------------------------------- */
+
+.md-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgb(var(--md-scrim) / 0.4);
+  overflow-y: auto;
+}
+
+.md-dialog {
+  width: 100%;
+  max-width: 28rem;
+  max-height: calc(100vh - 2rem);
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--md-shape-xl);
+  background: var(--md-surface-container-high);
+  color: var(--md-on-surface);
+  box-shadow: var(--md-elevation-3);
+  animation: md-dialog-in var(--md-duration-medium) var(--md-easing-emphasised);
+}
+
+.md-dialog--wide { max-width: 40rem; }
+
+@keyframes md-dialog-in {
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.md-dialog__title {
+  padding: 1.5rem 1.5rem 0;
+  font-size: 1.5rem;
+  line-height: 2rem;
+}
+
+.md-dialog__content {
+  padding: 1rem 1.5rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.md-dialog__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.5rem 1.5rem 1.5rem;
+}
+
+/* ---------- Snackbar --------------------------------------------------- */
+
+.md-snackbar {
+  position: fixed;
+  left: 50%;
+  bottom: max(1rem, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: min(36rem, calc(100vw - 2rem));
+  padding: 0.875rem 1rem;
+  border-radius: var(--md-shape-xs);
+  background: var(--md-inverse-surface);
+  color: var(--md-inverse-on-surface);
+  font-size: 0.875rem;
+  box-shadow: var(--md-elevation-3);
+  animation: md-snackbar-in var(--md-duration-medium) var(--md-easing-emphasised);
+}
+
+.md-snackbar--error { background: var(--md-error); color: var(--md-on-error); }
+
+@keyframes md-snackbar-in {
+  from { opacity: 0; transform: translate(-50%, 1rem); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* ---------- Progress --------------------------------------------------- */
+
+.md-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 2rem 0;
+  width: 100%;
+}
+
+.md-linear-progress {
+  width: min(16rem, 100%);
+  height: 4px;
+  border-radius: var(--md-shape-full);
+  background: var(--md-surface-container-highest);
+  overflow: hidden;
+}
+
+.md-linear-progress__bar {
+  width: 40%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--md-primary);
+  animation: md-progress 1.4s var(--md-easing-standard) infinite;
+}
+
+@keyframes md-progress {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(260%); }
+}
+
+.md-loading__label { color: var(--md-on-surface-variant); font-size: 0.875rem; }
+
+/* ---------- Empty state ------------------------------------------------ */
+
+.md-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 3rem 1.5rem;
+  text-align: center;
+}
+
+.md-empty__icon {
+  width: 2.5rem;
+  height: 2.5rem;
+  color: var(--md-on-surface-variant);
+  opacity: 0.6;
+}
+
+.md-empty__title { margin: 0; font-size: 1.125rem; font-weight: 500; }
+.md-empty__body { margin: 0; max-width: 28rem; color: var(--md-on-surface-variant); font-size: 0.875rem; }
+
+/* ---------- Divider ---------------------------------------------------- */
+
+.md-divider {
+  height: 1px;
+  border: none;
+  margin: 0;
+  background: var(--md-outline-variant);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
