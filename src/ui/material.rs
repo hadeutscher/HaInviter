@@ -255,8 +255,13 @@ pub fn TextArea(
                     rows: "{rows}",
                     placeholder: " ",
                     disabled,
+                    // The value belongs in the attribute, never as a text
+                    // child: a dynamic child is wrapped in hydration marker
+                    // comments, and inside a <textarea> those markers are the
+                    // field's literal content — they showed up as the default
+                    // text of the note box.
+                    value: "{value}",
                     oninput: move |e| oninput.call(e),
-                    "{value}"
                 }
                 span { class: "md-field__label", "{label}" }
             }
