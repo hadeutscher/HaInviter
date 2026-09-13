@@ -1,0 +1,18 @@
+.git
+.github
+.gitignore
+README.md
+docker-compose.yml
+Dockerfile
+LICENSE
+
+# Build output
+/target/
+/dist/
+
+# Local runtime data — never bake a database into an image
+/data/
+
+.vscode/
+.idea/
+**/*.rs.bk

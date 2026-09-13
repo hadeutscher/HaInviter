@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts are useless in CI and only slow the cache down.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # The toolchain (and the wasm target) come from rust-toolchain.toml.
+      - name: Setup | Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Setup | Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check | Formatting
+        run: cargo fmt --all --check
+
+      - name: Check | Clippy (server)
+        run: cargo clippy --features server --all-targets -- -D warnings
+
+      # The client half of the app only exists on wasm32, so it needs its own
+      # pass: a change that breaks the browser build compiles fine natively.
+      - name: Check | WASM client
+        run: cargo check --features web --target wasm32-unknown-unknown
+
+      - name: Test
+        run: cargo test --features server --no-fail-fast

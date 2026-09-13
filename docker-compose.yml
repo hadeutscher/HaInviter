@@ -1,0 +1,20 @@
+# For running HaInviter on a single host. Kubernetes manifests live in the
+# haserver configuration repository.
+services:
+  hainviter:
+    image: ghcr.io/hadeutscher/hainviter:latest
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # The public origin, used for the invitation links shown in the admin
+      # panel and written to the CSV export.
+      HAINVITER_BASE_URL: ""
+      # Set this to keep one admin link across restarts. Leave it unset to get a
+      # fresh token printed to the log on every start.
+      # HAINVITER_ADMIN_TOKEN: ""
+    volumes:
+      # The database, the audit log and uploaded cover images. Losing this
+      # directory means losing the guest list, so keep it on the host.
+      - ./data:/data
