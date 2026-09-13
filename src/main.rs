@@ -56,7 +56,7 @@ pub enum Route {
 #[component]
 fn App() -> Element {
     rsx! {
-        document::Link { rel: "icon", href: asset!("/assets/favicon.svg") }
+        document::Link { rel: "icon", href: asset!("/assets/favicon.ico") }
         document::Stylesheet { href: asset!("/assets/material.css") }
         document::Stylesheet { href: asset!("/assets/app.css") }
         Router::<Route> {}
