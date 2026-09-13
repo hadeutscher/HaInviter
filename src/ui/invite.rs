@@ -5,6 +5,7 @@
 
 use crate::{
     api,
+    i18n::{active, t},
     types::{InviteView, Rsvp, RsvpSubmission},
     ui::material::{Button, ButtonKind, Chip, Icon, Loading, SelectField, TextArea, Tone},
 };
@@ -13,6 +14,7 @@ use dioxus::prelude::*;
 /// Resolves the token, then renders the invitation.
 #[component]
 pub fn Invite(token: String) -> Element {
+    let s = t();
     let lookup = token.clone();
     let invite = use_server_future(move || {
         let token = lookup.clone();
@@ -26,7 +28,9 @@ pub fn Invite(token: String) -> Element {
             },
             Some(Err(_)) => rsx! { InviteUnknown {} },
             None => rsx! {
-                main { class: "page page--centred", Loading { label: "Opening your invitation…".to_owned() } }
+                main { class: "page page--centred",
+                    Loading { label: s.invite_loading.to_owned() }
+                }
             },
         }
     }
@@ -36,17 +40,16 @@ pub fn Invite(token: String) -> Element {
 /// the link ever existed.
 #[component]
 fn InviteUnknown() -> Element {
+    let s = t();
     rsx! {
-        document::Title { "Invitation not found — HaInviter" }
+        document::Title { "{s.invite_invalid_title} — {s.app_name}" }
         main { class: "page page--centred",
             div { class: "md-card md-card--elevated landing",
                 Icon { name: "error", class: "landing__mark".to_owned() }
-                h1 { class: "md-headline-medium", "This invitation link is not valid" }
-                p { class: "md-body-large md-on-surface-variant",
-                    "The link may have been copied incompletely, or replaced with a new one."
-                }
+                h1 { class: "md-headline-medium", "{s.invite_invalid_title}" }
+                p { class: "md-body-large md-on-surface-variant", "{s.invite_invalid_body}" }
                 p { class: "md-body-small md-on-surface-variant landing__note",
-                    "Please ask the hosts to send you a fresh link."
+                    "{s.invite_invalid_note}"
                 }
             }
         }
@@ -56,6 +59,9 @@ fn InviteUnknown() -> Element {
 /// The invitation itself, plus the RSVP form.
 #[component]
 fn InviteCard(token: String, initial: InviteView) -> Element {
+    let s = t();
+    let locale = active();
+
     // The server's answer is the source of truth: after a successful reply we
     // replace this wholesale with what was actually stored.
     let mut view = use_signal(|| initial.clone());
@@ -74,15 +80,25 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
     let current = view();
     let event = current.event.clone();
     let answered = current.status != Rsvp::Pending;
-    let when = crate::types::format_event_datetime(&event.starts_at);
-    let deadline = crate::types::format_date(&event.rsvp_deadline);
+    let when = locale.format_datetime(&event.starts_at);
+    let deadline = locale.format_date(&event.rsvp_deadline);
     let can_bring_others = event.allow_plus_ones && current.max_party_size > 1;
+    let status_label = locale.status(current.status);
+
     // Hoisted out of `rsx!`: a conditional in attribute position is treated as a
     // string expression there, which would not type-check for typed props.
     let (status_tone, status_icon) = if current.status == Rsvp::Attending {
         (Tone::Positive, "check_circle")
     } else {
         (Tone::Negative, "cancel_circle")
+    };
+
+    let greeting = s.invite_greeting.replace("{}", &current.guest_name);
+    let reply_by = s.invite_reply_by.replace("{}", &deadline);
+    let closed_note = if answered {
+        s.invite_closed_answered.replace("{}", status_label)
+    } else {
+        s.invite_closed.to_owned()
     };
 
     let hero_style = if event.cover_image.is_empty() {
@@ -94,7 +110,7 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
 
     let submit = move |_| {
         let Some(coming) = attending() else {
-            error.set(Some("Please choose whether you can come.".to_owned()));
+            error.set(Some(s.invite_choose_first.to_owned()));
             return;
         };
         let submission = RsvpSubmission {
@@ -124,7 +140,7 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
     };
 
     rsx! {
-        document::Title { "{event.title} — invitation for {current.guest_name}" }
+        document::Title { "{event.title} — {s.invite_page_title_suffix} {current.guest_name}" }
         document::Meta { name: "description", content: "{event.title}. {when}" }
 
         main { class: "page invite",
@@ -147,9 +163,9 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
             div { class: "invite__body",
                 // ── Greeting & description ────────────────────────────────
                 section { class: "md-card md-card--elevated invite__card",
-                    p { class: "md-title-medium invite__greeting", "Dear {current.guest_name}," }
+                    p { class: "md-title-medium invite__greeting", "{greeting}" }
                     if event.description.is_empty() {
-                        p { class: "md-body-large", "You are invited — we would love to see you there." }
+                        p { class: "md-body-large", "{s.invite_default_body}" }
                     } else {
                         // Preserve the paragraph breaks the host typed.
                         for (i , para) in event.description.split("\n\n").enumerate() {
@@ -165,7 +181,7 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
                             div { class: "invite__detail",
                                 Icon { name: "event" }
                                 div {
-                                    span { class: "md-label-large", "When" }
+                                    span { class: "md-label-large", "{s.invite_when}" }
                                     span { class: "md-body-large", "{when}" }
                                 }
                             }
@@ -174,7 +190,7 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
                             div { class: "invite__detail",
                                 Icon { name: "place" }
                                 div {
-                                    span { class: "md-label-large", "Where" }
+                                    span { class: "md-label-large", "{s.invite_where}" }
                                     span { class: "md-body-large", "{event.location}" }
                                     if !event.location_url.is_empty() {
                                         a {
@@ -182,7 +198,7 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
                                             href: "{event.location_url}",
                                             target: "_blank",
                                             rel: "noopener noreferrer",
-                                            "Open in maps"
+                                            "{s.invite_open_maps}"
                                         }
                                     }
                                 }
@@ -194,10 +210,10 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
                 // ── RSVP ─────────────────────────────────────────────────
                 section { class: "md-card md-card--elevated invite__card invite__rsvp",
                     div { class: "invite__rsvp-head",
-                        h2 { class: "md-title-large", "Will you join us?" }
+                        h2 { class: "md-title-large", "{s.invite_question}" }
                         if answered {
                             Chip {
-                                label: current.status.label().to_owned(),
+                                label: status_label.to_owned(),
                                 tone: status_tone,
                                 icon: status_icon,
                             }
@@ -205,24 +221,16 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
                     }
 
                     if !deadline.is_empty() && !current.closed {
-                        p { class: "md-body-small md-on-surface-variant",
-                            "Please reply by {deadline}."
-                        }
+                        p { class: "md-body-small md-on-surface-variant", "{reply_by}" }
                     }
 
                     if current.closed {
                         div { class: "invite__closed",
                             Icon { name: "schedule" }
                             div {
-                                p { class: "md-body-large",
-                                    if answered {
-                                        "Replies have closed. Your answer is recorded as \"{current.status.label()}\"."
-                                    } else {
-                                        "Replies have closed."
-                                    }
-                                }
+                                p { class: "md-body-large", "{closed_note}" }
                                 p { class: "md-body-small md-on-surface-variant",
-                                    "If something has changed, please contact the hosts directly."
+                                    "{s.invite_closed_contact}"
                                 }
                             }
                         }
@@ -237,7 +245,7 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
                                 "aria-checked": if attending() == Some(true) { "true" } else { "false" },
                                 onclick: move |_| attending.set(Some(true)),
                                 Icon { name: "check_circle" }
-                                span { "Yes, I'll be there" }
+                                span { "{s.invite_yes}" }
                             }
                             button {
                                 class: if attending() == Some(false) { "invite__choice invite__choice--no is-selected" } else { "invite__choice invite__choice--no" },
@@ -246,15 +254,17 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
                                 "aria-checked": if attending() == Some(false) { "true" } else { "false" },
                                 onclick: move |_| attending.set(Some(false)),
                                 Icon { name: "cancel_circle" }
-                                span { "Sorry, I can't" }
+                                span { "{s.invite_no}" }
                             }
                         }
 
                         if attending() == Some(true) && can_bring_others {
                             SelectField {
-                                label: "How many of you are coming?".to_owned(),
+                                label: s.invite_party_question.to_owned(),
                                 value: "{party}",
-                                options: (1..=current.max_party_size).map(party_option).collect::<Vec<_>>(),
+                                options: (1..=current.max_party_size)
+                                    .map(|n| (n.to_string(), locale.n_of_us(n)))
+                                    .collect::<Vec<_>>(),
                                 onchange: move |e: FormEvent| {
                                     if let Ok(n) = e.value().parse::<i64>() {
                                         party.set(n);
@@ -264,10 +274,10 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
                         }
 
                         TextArea {
-                            label: "A note for the hosts (optional)".to_owned(),
+                            label: s.invite_note_label.to_owned(),
                             value: "{note}",
                             rows: 3,
-                            supporting: "Dietary needs, a song request, or just hello.".to_owned(),
+                            supporting: s.invite_note_help.to_owned(),
                             oninput: move |e: FormEvent| note.set(e.value()),
                         }
 
@@ -278,9 +288,9 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
                         if just_saved() {
                             p { class: "invite__saved", Icon { name: "check_circle" }
                                 if current.status == Rsvp::Attending {
-                                    "Thank you — we have you down. See you there!"
+                                    "{s.invite_thanks_yes}"
                                 } else {
-                                    "Thank you for letting us know — you will be missed."
+                                    "{s.invite_thanks_no}"
                                 }
                             }
                         }
@@ -292,31 +302,20 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
                             icon: "mail",
                             onclick: submit,
                             if saving() {
-                                "Sending…"
+                                "{s.invite_sending}"
                             } else if answered {
-                                "Update my reply"
+                                "{s.invite_update}"
                             } else {
-                                "Send my reply"
+                                "{s.invite_send}"
                             }
                         }
                     }
                 }
 
-                footer { class: "invite__footer md-body-small",
-                    "This invitation is personal to you — please do not forward the link."
-                }
+                footer { class: "invite__footer md-body-small", "{s.invite_footer}" }
             }
         }
     }
-}
-
-/// Label for one party-size option.
-fn party_option(n: i64) -> (String, String) {
-    let label = match n {
-        1 => "Just me".to_owned(),
-        n => format!("{n} of us"),
-    };
-    (n.to_string(), label)
 }
 
 /// Extracts the human-readable part of a server-function error.

@@ -7,6 +7,7 @@ pub mod material;
 pub use admin::{AdminEvent, AdminEvents};
 pub use invite::Invite;
 
+use crate::i18n::t;
 use dioxus::prelude::*;
 use material::Icon;
 
@@ -14,19 +15,15 @@ use material::Icon;
 /// arrive through their personal link and admins through theirs.
 #[component]
 pub fn Home() -> Element {
+    let s = t();
     rsx! {
-        document::Title { "HaInviter" }
+        document::Title { "{s.app_name}" }
         main { class: "page page--centred",
             div { class: "md-card md-card--elevated landing",
                 Icon { name: "mail", class: "landing__mark".to_owned() }
-                h1 { class: "md-headline-medium", "HaInviter" }
-                p { class: "md-body-large md-on-surface-variant",
-                    "Invitations here are personal. Open the link the hosts sent you to see
-                     your invitation and let them know whether you can come."
-                }
-                p { class: "md-body-small md-on-surface-variant landing__note",
-                    "Lost your link? Ask whoever invited you to send it again."
-                }
+                h1 { class: "md-headline-medium", "{s.app_name}" }
+                p { class: "md-body-large md-on-surface-variant", "{s.home_body}" }
+                p { class: "md-body-small md-on-surface-variant landing__note", "{s.home_note}" }
             }
         }
     }
@@ -35,20 +32,17 @@ pub fn Home() -> Element {
 /// Anything that is not a known route.
 #[component]
 pub fn NotFound(segments: Vec<String>) -> Element {
-    let path = segments.join("/");
+    let s = t();
+    let path = format!("/{}", segments.join("/"));
+    let body = s.not_found_body.replace("{}", &path);
     rsx! {
-        document::Title { "Not found — HaInviter" }
+        document::Title { "{s.not_found_title} — {s.app_name}" }
         main { class: "page page--centred",
             div { class: "md-card md-card--elevated landing",
                 Icon { name: "search", class: "landing__mark".to_owned() }
-                h1 { class: "md-headline-medium", "Nothing here" }
-                p { class: "md-body-large md-on-surface-variant",
-                    "We could not find " code { "/{path}" } "."
-                }
-                p { class: "md-body-small md-on-surface-variant landing__note",
-                    "Invitation links look like /i/… — check the link you were sent, or ask the
-                     hosts to resend it."
-                }
+                h1 { class: "md-headline-medium", "{s.not_found_title}" }
+                p { class: "md-body-large md-on-surface-variant", "{body}" }
+                p { class: "md-body-small md-on-surface-variant landing__note", "{s.not_found_note}" }
             }
         }
     }

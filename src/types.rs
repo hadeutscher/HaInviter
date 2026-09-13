@@ -44,15 +44,6 @@ impl Rsvp {
             _ => Self::Pending,
         }
     }
-
-    /// Human-readable label for the admin panel.
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Pending => "Awaiting reply",
-            Self::Attending => "Attending",
-            Self::Declined => "Not attending",
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -147,40 +138,11 @@ pub struct RsvpSubmission {
 }
 
 // ---------------------------------------------------------------------------
-// Formatting helpers (shared, so the client and the CSV export agree)
+// Formatting helpers
+//
+// Anything whose wording depends on the language lives in `crate::i18n`; what
+// stays here is locale-neutral.
 // ---------------------------------------------------------------------------
-
-/// Formats a `YYYY-MM-DDTHH:MM` local timestamp as
-/// `"Saturday, 12 September 2026 at 19:00"`.
-///
-/// Unparseable input is returned unchanged rather than hidden, so a typo in the
-/// admin panel is visible instead of silently blanking the invitation.
-pub fn format_event_datetime(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"] {
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(trimmed, fmt) {
-            return dt.format("%A, %-d %B %Y at %H:%M").to_string();
-        }
-    }
-    if let Ok(d) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
-        return d.format("%A, %-d %B %Y").to_string();
-    }
-    trimmed.to_owned()
-}
-
-/// Formats a `YYYY-MM-DD` date as `"12 September 2026"`.
-pub fn format_date(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
-        .map(|d| d.format("%-d %B %Y").to_string())
-        .unwrap_or_else(|_| trimmed.to_owned())
-}
 
 /// Turns an RFC 3339 timestamp into `"2026-09-12 19:04"` for table display.
 pub fn format_timestamp(raw: &str) -> String {
@@ -275,19 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn event_datetime_is_spelled_out() {
-        assert_eq!(
-            format_event_datetime("2026-09-12T19:30"),
-            "Saturday, 12 September 2026 at 19:30"
-        );
-        assert_eq!(format_event_datetime("  "), "");
-        // Anything unparseable is shown as typed rather than silently blanked.
-        assert_eq!(format_event_datetime("next spring"), "next spring");
-    }
-
-    #[test]
-    fn dates_and_timestamps_are_shortened_for_display() {
-        assert_eq!(format_date("2026-09-12"), "12 September 2026");
+    fn timestamps_are_shortened_for_display() {
         assert_eq!(
             format_timestamp("2026-09-12T19:04:31.123+00:00"),
             "2026-09-12 19:04"

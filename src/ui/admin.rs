@@ -6,6 +6,7 @@
 
 use crate::{
     Route, api,
+    i18n::{active, t},
     types::{EventAdminView, EventInput, EventSummary, GuestDto, Rsvp},
     ui::material::{
         Button, ButtonKind, Chip, Dialog, EmptyState, Fab, Icon, IconButton, Loading, SelectField,
@@ -65,10 +66,11 @@ fn copy_invite_link(base: String, guest_token: &str) {
 /// The Material top app bar used by both admin screens.
 #[component]
 fn AdminBar(title: String, subtitle: String, back: Option<Route>, actions: Element) -> Element {
+    let s = t();
     rsx! {
         header { class: "admin__bar",
             if let Some(route) = back {
-                Link { to: route, class: "md-icon-button", "aria-label": "Back to events",
+                Link { to: route, class: "md-icon-button", "aria-label": "{s.admin_back}",
                     Icon { name: "arrow_back" }
                 }
             }
@@ -86,41 +88,49 @@ fn AdminBar(title: String, subtitle: String, back: Option<Route>, actions: Eleme
 /// Shown whenever the server rejects the token in the URL.
 #[component]
 fn NotAuthorised() -> Element {
+    let s = t();
     rsx! {
         main { class: "page page--centred",
             div { class: "md-card md-card--elevated landing",
                 Icon { name: "error", class: "landing__mark".to_owned() }
-                h1 { class: "md-headline-medium", "This admin link is not valid" }
-                p { class: "md-body-large md-on-surface-variant",
-                    "A fresh admin link is printed to the server log every time HaInviter starts."
-                }
+                h1 { class: "md-headline-medium", "{s.admin_invalid_title}" }
+                p { class: "md-body-large md-on-surface-variant", "{s.admin_invalid_body}" }
                 p { class: "md-body-small md-on-surface-variant landing__note",
-                    "Run "
+                    "{s.admin_invalid_note_before}"
                     code { "kubectl logs deploy/hainviter" }
-                    " to read it, or set HAINVITER_ADMIN_TOKEN to keep the link stable."
+                    "{s.admin_invalid_note_after}"
                 }
             }
         }
     }
 }
 
+/// "12 invited · 30 expected", in the active language.
+fn invited_expected(s: &'static crate::i18n::Strings, invited: i64, expected: i64) -> String {
+    s.admin_invited_expected
+        .replace("{invited}", &invited.to_string())
+        .replace("{expected}", &expected.to_string())
+}
+
 /// The chips summarising one event's replies.
 #[component]
 fn ResponseChips(summary: EventSummary) -> Element {
+    let s = t();
+    let count = |template: &str, n: i64| template.replace("{n}", &n.to_string());
     rsx! {
         div { class: "event-card__chips",
             Chip {
-                label: format!("{} coming", summary.attending),
+                label: count(s.admin_n_coming, summary.attending),
                 tone: Tone::Positive,
                 icon: "check_circle",
             }
             Chip {
-                label: format!("{} declined", summary.declined),
+                label: count(s.admin_n_declined, summary.declined),
                 tone: Tone::Negative,
                 icon: "cancel_circle",
             }
             Chip {
-                label: format!("{} waiting", summary.pending),
+                label: count(s.admin_n_waiting, summary.pending),
                 tone: Tone::Waiting,
                 icon: "schedule",
             }
@@ -135,6 +145,8 @@ fn ResponseChips(summary: EventSummary) -> Element {
 /// The admin landing screen: every event, and a button to create another.
 #[component]
 pub fn AdminEvents(token: String) -> Element {
+    let s = t();
+    let locale = active();
     let tok = use_signal(|| token);
     let mut events = use_resource(move || async move { api::list_events(tok()).await });
 
@@ -148,7 +160,7 @@ pub fn AdminEvents(token: String) -> Element {
     let create = move |_| {
         let input = form();
         if input.title.trim().is_empty() {
-            toast.set(Some(("An event needs a title.".to_owned(), true)));
+            toast.set(Some((s.admin_needs_title.to_owned(), true)));
             return;
         }
         saving.set(true);
@@ -174,15 +186,15 @@ pub fn AdminEvents(token: String) -> Element {
     };
 
     rsx! {
-        document::Title { "Events — HaInviter admin" }
+        document::Title { "{s.admin_events} — {s.admin_subtitle}" }
         main { class: "page admin",
             AdminBar {
-                title: "Events".to_owned(),
-                subtitle: "HaInviter admin".to_owned(),
+                title: s.admin_events.to_owned(),
+                subtitle: s.admin_subtitle.to_owned(),
                 actions: rsx! {
                     IconButton {
                         icon: "refresh",
-                        label: "Reload".to_owned(),
+                        label: s.reload.to_owned(),
                         onclick: move |_| events.restart(),
                     }
                 },
@@ -191,10 +203,7 @@ pub fn AdminEvents(token: String) -> Element {
             div { class: "admin__content",
                 div { class: "token-callout",
                     Icon { name: "link" }
-                    p {
-                        "Anyone with this page's address can administer HaInviter. Keep it out of
-                         chats and screenshots — restarting the server issues a new one."
-                    }
+                    p { "{s.admin_link_warning}" }
                 }
 
                 match &*events.read_unchecked() {
@@ -202,10 +211,8 @@ pub fn AdminEvents(token: String) -> Element {
                         div { class: "md-card md-card--outlined",
                             EmptyState {
                                 icon: "event",
-                                title: "No events yet".to_owned(),
-                                body: "Create an event, then add the people you want to invite. Each
-                                       guest gets their own private link."
-                                    .to_owned(),
+                                title: s.admin_no_events_title.to_owned(),
+                                body: s.admin_no_events_body.to_owned(),
                             }
                         }
                     },
@@ -221,7 +228,7 @@ pub fn AdminEvents(token: String) -> Element {
                                         if !summary.starts_at.is_empty() {
                                             span {
                                                 Icon { name: "event" }
-                                                "{crate::types::format_event_datetime(&summary.starts_at)}"
+                                                "{locale.format_datetime(&summary.starts_at)}"
                                             }
                                         }
                                         if !summary.location.is_empty() {
@@ -232,7 +239,7 @@ pub fn AdminEvents(token: String) -> Element {
                                         }
                                         span {
                                             Icon { name: "group" }
-                                            "{summary.guest_count} invited · {summary.head_count} expected"
+                                            {invited_expected(s, summary.guest_count, summary.head_count)}
                                         }
                                     }
                                     ResponseChips { summary: summary.clone() }
@@ -241,13 +248,13 @@ pub fn AdminEvents(token: String) -> Element {
                         }
                     },
                     Some(Err(_)) => rsx! { NotAuthorised {} },
-                    None => rsx! { Loading { label: "Loading events…".to_owned() } },
+                    None => rsx! { Loading { label: s.admin_loading_events.to_owned() } },
                 }
             }
 
             Fab {
                 icon: "add",
-                label: "New event".to_owned(),
+                label: s.admin_new_event.to_owned(),
                 onclick: move |_| {
                     form.set(EventInput { allow_plus_ones: true, ..EventInput::default() });
                     creating.set(true);
@@ -257,16 +264,16 @@ pub fn AdminEvents(token: String) -> Element {
             Dialog {
                 open: creating(),
                 wide: true,
-                title: "New event".to_owned(),
+                title: s.admin_new_event.to_owned(),
                 onclose: move |_| creating.set(false),
                 actions: rsx! {
                     Button {
                         kind: ButtonKind::Text,
                         onclick: move |_| creating.set(false),
-                        "Cancel"
+                        "{s.cancel}"
                     }
                     Button { disabled: saving(), onclick: create,
-                        if saving() { "Creating…" } else { "Create event" }
+                        if saving() { "{s.admin_creating}" } else { "{s.admin_create_event}" }
                     }
                 },
                 EventFields { token: tok(), form }
@@ -291,6 +298,7 @@ pub fn AdminEvents(token: String) -> Element {
 /// screen's "Details" tab.
 #[component]
 fn EventFields(token: String, form: Signal<EventInput>) -> Element {
+    let s = t();
     let tok = use_signal(|| token);
     let mut form = form;
     let mut uploading = use_signal(|| false);
@@ -304,7 +312,10 @@ fn EventFields(token: String, form: Signal<EventInput>) -> Element {
         // Checked here as well as on the server so an oversized photo fails
         // before it is read into memory and shipped over the wire.
         if file.size() > 8 * 1024 * 1024 {
-            upload_error.set(Some("That image is larger than 8 MB.".to_owned()));
+            upload_error.set(Some(
+                s.field_cover_too_large
+                    .replace("{}", &(api::MAX_COVER_BYTES / (1024 * 1024)).to_string()),
+            ));
             return;
         }
         let name = file.name();
@@ -316,7 +327,7 @@ fn EventFields(token: String, form: Signal<EventInput>) -> Element {
                     Ok(url) => form.with_mut(|f| f.cover_image = url),
                     Err(e) => upload_error.set(Some(message_of(&e))),
                 },
-                Err(e) => upload_error.set(Some(format!("Could not read that file: {e}"))),
+                Err(e) => upload_error.set(Some(format!("{} ({e})", s.field_cover_unreadable))),
             }
             uploading.set(false);
         });
@@ -326,65 +337,65 @@ fn EventFields(token: String, form: Signal<EventInput>) -> Element {
         div { class: "form-grid",
             div { class: "form-span-2",
                 TextField {
-                    label: "Event title".to_owned(),
+                    label: s.field_title.to_owned(),
                     value: current.title.clone(),
-                    supporting: "Shown as the invitation's headline.".to_owned(),
+                    supporting: s.field_title_help.to_owned(),
                     oninput: move |e: FormEvent| form.with_mut(|f| f.title = e.value()),
                 }
             }
             TextField {
-                label: "Hosted by".to_owned(),
+                label: s.field_hosts.to_owned(),
                 value: current.hosts.clone(),
-                supporting: "e.g. Dana & Yuval".to_owned(),
+                supporting: s.field_hosts_help.to_owned(),
                 oninput: move |e: FormEvent| form.with_mut(|f| f.hosts = e.value()),
             }
             TextField {
-                label: "Starts".to_owned(),
+                label: s.field_starts.to_owned(),
                 value: current.starts_at.clone(),
                 input_type: "datetime-local".to_owned(),
                 oninput: move |e: FormEvent| form.with_mut(|f| f.starts_at = e.value()),
             }
             TextField {
-                label: "Location".to_owned(),
+                label: s.field_location.to_owned(),
                 value: current.location.clone(),
                 oninput: move |e: FormEvent| form.with_mut(|f| f.location = e.value()),
             }
             TextField {
-                label: "Map link".to_owned(),
+                label: s.field_map.to_owned(),
                 value: current.location_url.clone(),
-                supporting: "Optional — opens in the guest's maps app.".to_owned(),
+                supporting: s.field_map_help.to_owned(),
                 oninput: move |e: FormEvent| form.with_mut(|f| f.location_url = e.value()),
             }
             TextField {
-                label: "Reply by".to_owned(),
+                label: s.field_deadline.to_owned(),
                 value: current.rsvp_deadline.clone(),
                 input_type: "date".to_owned(),
-                supporting: "After this date the form becomes read-only.".to_owned(),
+                supporting: s.field_deadline_help.to_owned(),
                 oninput: move |e: FormEvent| form.with_mut(|f| f.rsvp_deadline = e.value()),
             }
             div { class: "form-span-2",
                 TextArea {
-                    label: "Invitation text".to_owned(),
+                    label: s.field_body.to_owned(),
                     value: current.description.clone(),
                     rows: 5,
-                    supporting: "Leave a blank line between paragraphs.".to_owned(),
+                    supporting: s.field_body_help.to_owned(),
                     oninput: move |e: FormEvent| form.with_mut(|f| f.description = e.value()),
                 }
             }
             div { class: "form-span-2 stack",
-                span { class: "md-label-large md-on-surface-variant", "Cover image" }
+                span { class: "md-label-large md-on-surface-variant", "{s.field_cover}" }
                 div { class: "cover-preview",
                     if current.cover_image.is_empty() {
                         img { src: "", alt: "" }
                     } else {
-                        img { src: "{current.cover_image}", alt: "Cover preview" }
+                        img { src: "{current.cover_image}", alt: "{s.field_cover_preview_alt}" }
                     }
                     div { class: "inline-actions",
                         // A styled <label> opens the file picker without JavaScript.
                         label { r#for: "cover-file", class: "md-button md-button--outlined",
                             Icon { name: "upload" }
                             span { class: "md-button__label",
-                                if uploading() { "Uploading…" } else { "Upload image" }
+                                if uploading() { "{s.field_cover_uploading}" } else { "{s.field_cover_upload}" }
                             }
                         }
                         input {
@@ -398,13 +409,13 @@ fn EventFields(token: String, form: Signal<EventInput>) -> Element {
                             Button {
                                 kind: ButtonKind::Text,
                                 onclick: move |_| form.with_mut(|f| f.cover_image = String::new()),
-                                "Remove"
+                                "{s.field_cover_remove}"
                             }
                         }
                     }
                 }
                 TextField {
-                    label: "…or paste an image URL".to_owned(),
+                    label: s.field_cover_url.to_owned(),
                     value: current.cover_image.clone(),
                     oninput: move |e: FormEvent| form.with_mut(|f| f.cover_image = e.value()),
                 }
@@ -414,7 +425,7 @@ fn EventFields(token: String, form: Signal<EventInput>) -> Element {
             }
             div { class: "form-span-2",
                 Switch {
-                    label: "Guests may bring the people on their invitation".to_owned(),
+                    label: s.field_plus_ones.to_owned(),
                     checked: current.allow_plus_ones,
                     onchange: move |on| form.with_mut(|f| f.allow_plus_ones = on),
                 }
@@ -438,6 +449,7 @@ enum Tab {
 /// One event: its details, its guest list and its replies.
 #[component]
 pub fn AdminEvent(token: String, event_id: i64) -> Element {
+    let s = t();
     let tok = use_signal(|| token);
     let mut detail = use_resource(move || async move { api::get_event(tok(), event_id).await });
     let base = use_resource(move || async move { api::base_url().await });
@@ -470,7 +482,7 @@ pub fn AdminEvent(token: String, event_id: i64) -> Element {
             return rsx! {
                 main { class: "page admin",
                     AdminBar {
-                        title: "Loading…".to_owned(),
+                        title: s.loading.to_owned(),
                         subtitle: String::new(),
                         back: Route::AdminEvents { token: tok() },
                         actions: rsx! {},
@@ -486,16 +498,16 @@ pub fn AdminEvent(token: String, event_id: i64) -> Element {
         main { class: "page admin",
             AdminBar {
                 title: view.event.title.clone(),
-                subtitle: format!(
-                    "{} invited · {} expected",
-                    view.guests.len(),
+                subtitle: invited_expected(
+                    s,
+                    view.guests.len() as i64,
                     expected_head_count(&view.guests),
                 ),
                 back: Route::AdminEvents { token: tok() },
                 actions: rsx! {
                     IconButton {
                         icon: "refresh",
-                        label: "Reload".to_owned(),
+                        label: s.reload.to_owned(),
                         onclick: move |_| detail.restart(),
                     }
                 },
@@ -507,19 +519,19 @@ pub fn AdminEvent(token: String, event_id: i64) -> Element {
                         class: if tab() == Tab::Details { "admin-tab is-active" } else { "admin-tab" },
                         r#type: "button",
                         onclick: move |_| tab.set(Tab::Details),
-                        "Details"
+                        "{s.tab_details}"
                     }
                     button {
                         class: if tab() == Tab::Guests { "admin-tab is-active" } else { "admin-tab" },
                         r#type: "button",
                         onclick: move |_| tab.set(Tab::Guests),
-                        "Guests ({view.guests.len()})"
+                        {s.tab_guests.replace("{n}", &view.guests.len().to_string())}
                     }
                     button {
                         class: if tab() == Tab::Responses { "admin-tab is-active" } else { "admin-tab" },
                         r#type: "button",
                         onclick: move |_| tab.set(Tab::Responses),
-                        "Responses"
+                        "{s.tab_responses}"
                     }
                 }
 
@@ -579,6 +591,7 @@ fn DetailsTab(
     toast: Signal<Toast>,
     reload: Resource<Result<EventAdminView, ServerFnError>>,
 ) -> Element {
+    let s = t();
     let tok = use_signal(|| token);
     let mut toast = toast;
     let mut reload = reload;
@@ -592,7 +605,7 @@ fn DetailsTab(
         spawn(async move {
             match api::update_event(tok(), event_id, input).await {
                 Ok(()) => {
-                    toast.set(Some(("Event saved.".to_owned(), false)));
+                    toast.set(Some((s.admin_saved.to_owned(), false)));
                     reload.restart();
                 }
                 Err(e) => toast.set(Some((message_of(&e), true))),
@@ -623,31 +636,31 @@ fn DetailsTab(
                     kind: ButtonKind::Danger,
                     icon: "delete",
                     onclick: move |_| confirming_delete.set(true),
-                    "Delete event"
+                    "{s.admin_delete_event}"
                 }
                 Button { icon: "check", disabled: saving(), onclick: save,
-                    if saving() { "Saving…" } else { "Save changes" }
+                    if saving() { "{s.saving}" } else { "{s.admin_save_changes}" }
                 }
             }
         }
 
         Dialog {
             open: confirming_delete(),
-            title: "Delete this event?".to_owned(),
+            title: s.admin_delete_event_title.to_owned(),
             onclose: move |_| confirming_delete.set(false),
             actions: rsx! {
                 Button {
                     kind: ButtonKind::Text,
                     onclick: move |_| confirming_delete.set(false),
-                    "Keep it"
+                    "{s.admin_keep_it}"
                 }
-                Button { kind: ButtonKind::Danger, onclick: delete, "Delete event" }
+                Button {
+                    kind: ButtonKind::Danger,
+                    onclick: delete,
+                    "{s.admin_delete_event}"
+                }
             },
-            p { class: "md-body-medium",
-                "The event and its guest list will be removed, and every invitation link for it
-                 will stop working. Replies already received stay in the audit log and in the
-                 database's reply history, but they will no longer be listed here or exported."
-            }
+            p { class: "md-body-medium", "{s.admin_delete_event_body}" }
         }
     }
 }
@@ -665,6 +678,8 @@ fn GuestsTab(
     toast: Signal<Toast>,
     reload: Resource<Result<EventAdminView, ServerFnError>>,
 ) -> Element {
+    let s = t();
+    let locale = active();
     let tok = use_signal(|| token);
     let origin = use_signal(|| base_url);
     let mut toast = toast;
@@ -681,21 +696,18 @@ fn GuestsTab(
     let add = move |_| {
         let raw = bulk();
         if raw.trim().is_empty() {
-            toast.set(Some(("Type at least one name.".to_owned(), true)));
+            toast.set(Some((s.guests_type_a_name.to_owned(), true)));
             return;
         }
         let size = default_party().parse::<i64>().unwrap_or(1);
         adding.set(true);
         spawn(async move {
             match api::add_guests(tok(), event_id, raw, size).await {
-                Ok(0) => toast.set(Some((
-                    "Everyone on that list was already invited.".to_owned(),
-                    false,
-                ))),
+                Ok(0) => toast.set(Some((s.guests_all_present.to_owned(), false))),
                 Ok(n) => {
                     bulk.set(String::new());
                     toast.set(Some((
-                        format!("Added {n} guest{}.", if n == 1 { "" } else { "s" }),
+                        s.guests_added_n.replace("{n}", &n.to_string()),
                         false,
                     )));
                     reload.restart();
@@ -727,7 +739,7 @@ fn GuestsTab(
             match api::delete_guest(tok(), guest.id).await {
                 Ok(()) => {
                     removing.set(None);
-                    toast.set(Some((format!("Removed {}.", guest.name), false)));
+                    toast.set(Some((s.guests_removed.replace("{}", &guest.name), false)));
                     reload.restart();
                 }
                 Err(e) => {
@@ -740,54 +752,51 @@ fn GuestsTab(
 
     rsx! {
         section { class: "md-card md-card--elevated stack",
-            h2 { class: "md-title-large", "Add guests" }
+            h2 { class: "md-title-large", "{s.guests_add_title}" }
             TextArea {
-                label: "One name per line".to_owned(),
+                label: s.guests_one_per_line.to_owned(),
                 value: bulk(),
                 rows: 6,
-                supporting: "Add \", 4\" after a name to let that guest bring up to four people. \
-                             Names already invited are skipped."
-                    .to_owned(),
+                supporting: s.guests_paste_help.to_owned(),
                 oninput: move |e: FormEvent| bulk.set(e.value()),
             }
             div { class: "inline-actions",
                 SelectField {
-                    label: "Default party size".to_owned(),
+                    label: s.guests_default_party.to_owned(),
                     value: default_party(),
                     options: (1..=10).map(|n| (n.to_string(), n.to_string())).collect::<Vec<_>>(),
                     onchange: move |e: FormEvent| default_party.set(e.value()),
                 }
                 div { class: "spacer" }
                 Button { icon: "add", disabled: adding(), onclick: add,
-                    if adding() { "Adding…" } else { "Add to guest list" }
+                    if adding() { "{s.guests_adding}" } else { "{s.guests_add_button}" }
                 }
             }
         }
 
         section { class: "md-card md-card--elevated stack",
             div { class: "admin__section-title",
-                h2 { class: "md-title-large", "Guest list" }
+                h2 { class: "md-title-large", "{s.guests_list_title}" }
                 span { class: "md-body-small md-on-surface-variant",
-                    "{guests.len()} invited"
+                    {s.guests_n_invited.replace("{n}", &guests.len().to_string())}
                 }
             }
 
             if guests.is_empty() {
                 EmptyState {
                     icon: "group",
-                    title: "Nobody invited yet".to_owned(),
-                    body: "Paste your guest list above. Each name gets a private invitation link."
-                        .to_owned(),
+                    title: s.guests_none_title.to_owned(),
+                    body: s.guests_none_body.to_owned(),
                 }
             } else {
                 div { class: "guest-table-wrap",
                     table { class: "guest-table",
                         thead {
                             tr {
-                                th { "Guest" }
-                                th { "Reply" }
-                                th { class: "numeric", "Party" }
-                                th { "Invitation link" }
+                                th { "{s.col_guest}" }
+                                th { "{s.col_reply}" }
+                                th { class: "numeric", "{s.col_party}" }
+                                th { "{s.col_link}" }
                                 th { }
                             }
                         }
@@ -804,11 +813,17 @@ fn GuestsTab(
                                     },
                                     on_remove: move |g| removing.set(Some(g)),
                                     on_reissued: move |name: String| {
-                                        toast.set(Some((format!("New link issued for {name}."), false)));
+                                        toast.set(Some((
+                                            s.guests_link_reissued.replace("{}", &name),
+                                            false,
+                                        )));
                                         reload.restart();
                                     },
                                     on_reset: move |name: String| {
-                                        toast.set(Some((format!("Cleared {name}'s reply."), false)));
+                                        toast.set(Some((
+                                            s.guests_reply_cleared.replace("{}", &name),
+                                            false,
+                                        )));
                                         reload.restart();
                                     },
                                     on_error: move |text| toast.set(Some((text, true))),
@@ -823,25 +838,26 @@ fn GuestsTab(
 
         Dialog {
             open: editing().is_some(),
-            title: "Edit guest".to_owned(),
+            title: s.guests_edit_title.to_owned(),
             onclose: move |_| editing.set(None),
             actions: rsx! {
-                Button { kind: ButtonKind::Text, onclick: move |_| editing.set(None), "Cancel" }
-                Button { onclick: save_edit, "Save" }
+                Button {
+                    kind: ButtonKind::Text,
+                    onclick: move |_| editing.set(None),
+                    "{s.cancel}"
+                }
+                Button { onclick: save_edit, "{s.save}" }
             },
             TextField {
-                label: "Name".to_owned(),
+                label: s.guests_name.to_owned(),
                 value: edit_name(),
                 oninput: move |e: FormEvent| edit_name.set(e.value()),
             }
             SelectField {
-                label: "May bring up to".to_owned(),
+                label: s.guests_may_bring.to_owned(),
                 value: edit_party(),
                 options: (1..=20)
-                    .map(|n| (
-                        n.to_string(),
-                        if n == 1 { "just themselves".to_owned() } else { format!("{n} people") },
-                    ))
+                    .map(|n| (n.to_string(), locale.may_bring(n)))
                     .collect::<Vec<_>>(),
                 onchange: move |e: FormEvent| edit_party.set(e.value()),
             }
@@ -849,16 +865,23 @@ fn GuestsTab(
 
         Dialog {
             open: removing().is_some(),
-            title: "Remove this guest?".to_owned(),
+            title: s.guests_remove_title.to_owned(),
             onclose: move |_| removing.set(None),
             actions: rsx! {
-                Button { kind: ButtonKind::Text, onclick: move |_| removing.set(None), "Cancel" }
-                Button { kind: ButtonKind::Danger, onclick: confirm_remove, "Remove guest" }
+                Button {
+                    kind: ButtonKind::Text,
+                    onclick: move |_| removing.set(None),
+                    "{s.cancel}"
+                }
+                Button {
+                    kind: ButtonKind::Danger,
+                    onclick: confirm_remove,
+                    "{s.guests_remove_button}"
+                }
             },
             p { class: "md-body-medium",
                 if let Some(guest) = removing() {
-                    "{guest.name} will be removed and their invitation link will stop working.
-                     Any reply they already sent stays in the audit log."
+                    {s.guests_remove_body.replace("{}", &guest.name)}
                 }
             }
         }
@@ -877,6 +900,8 @@ fn GuestRow(
     on_reset: EventHandler<String>,
     on_error: EventHandler<String>,
 ) -> Element {
+    let s = t();
+    let locale = active();
     let tok = use_signal(|| token);
     let id = guest.id;
     let name = guest.name.clone();
@@ -921,12 +946,13 @@ fn GuestRow(
                 }
                 if !guest.responded_at.is_empty() {
                     span { class: "guest-table__note",
-                        "replied {crate::types::format_timestamp(&guest.responded_at)}"
+                        {s.guests_replied_at
+                            .replace("{}", &crate::types::format_timestamp(&guest.responded_at))}
                     }
                 }
             }
             td {
-                Chip { label: guest.status.label().to_owned(), tone, icon }
+                Chip { label: locale.status(guest.status).to_owned(), tone, icon }
             }
             td { class: "numeric",
                 if guest.status == Rsvp::Attending {
@@ -940,7 +966,7 @@ fn GuestRow(
                     code { "/i/{guest.token}" }
                     IconButton {
                         icon: "copy",
-                        label: "Copy invitation link".to_owned(),
+                        label: s.action_copy_link.to_owned(),
                         onclick: {
                             let origin = origin.clone();
                             let guest_token = guest.token.clone();
@@ -953,7 +979,7 @@ fn GuestRow(
                 div { class: "guest-table__actions",
                     IconButton {
                         icon: "edit",
-                        label: "Edit guest".to_owned(),
+                        label: s.action_edit_guest.to_owned(),
                         onclick: {
                             let guest = guest.clone();
                             move |_| on_edit.call(guest.clone())
@@ -962,18 +988,18 @@ fn GuestRow(
                     if guest.status != Rsvp::Pending {
                         IconButton {
                             icon: "refresh",
-                            label: "Clear this reply".to_owned(),
+                            label: s.action_clear_reply.to_owned(),
                             onclick: reset,
                         }
                     }
                     IconButton {
                         icon: "link",
-                        label: "Issue a new link".to_owned(),
+                        label: s.action_new_link.to_owned(),
                         onclick: reissue,
                     }
                     IconButton {
                         icon: "delete",
-                        label: "Remove guest".to_owned(),
+                        label: s.action_remove_guest.to_owned(),
                         danger: true,
                         onclick: {
                             let guest = guest.clone();
@@ -992,6 +1018,8 @@ fn GuestRow(
 
 #[component]
 fn ResponsesTab(token: String, event_id: i64, guests: Vec<GuestDto>) -> Element {
+    let s = t();
+    let locale = active();
     let attending = guests
         .iter()
         .filter(|g| g.status == Rsvp::Attending)
@@ -1010,26 +1038,26 @@ fn ResponsesTab(token: String, event_id: i64, guests: Vec<GuestDto>) -> Element 
             div { class: "stat-row",
                 Stat {
                     value: guests.len().to_string(),
-                    caption: "Invited".to_owned(),
+                    caption: s.stat_invited.to_owned(),
                 }
                 Stat {
                     value: attending.to_string(),
-                    caption: "Coming".to_owned(),
+                    caption: s.stat_coming.to_owned(),
                     tone: Tone::Positive,
                 }
                 Stat {
                     value: declined.to_string(),
-                    caption: "Declined".to_owned(),
+                    caption: s.stat_declined.to_owned(),
                     tone: Tone::Negative,
                 }
                 Stat {
                     value: pending.to_string(),
-                    caption: "Waiting".to_owned(),
+                    caption: s.stat_waiting.to_owned(),
                     tone: Tone::Waiting,
                 }
                 Stat {
                     value: head_count.to_string(),
-                    caption: "People expected".to_owned(),
+                    caption: s.stat_expected.to_owned(),
                     tone: Tone::Primary,
                 }
             }
@@ -1039,31 +1067,29 @@ fn ResponsesTab(token: String, event_id: i64, guests: Vec<GuestDto>) -> Element 
                     class: "md-button md-button--tonal",
                     href: "/admin/{token}/events/{event_id}/responses.csv",
                     Icon { name: "download" }
-                    span { class: "md-button__label", "Download CSV" }
+                    span { class: "md-button__label", "{s.responses_download}" }
                 }
             }
         }
 
         section { class: "md-card md-card--elevated stack",
-            h2 { class: "md-title-large", "Replies" }
+            h2 { class: "md-title-large", "{s.responses_title}" }
             if answered.is_empty() {
                 EmptyState {
                     icon: "mail",
-                    title: "No replies yet".to_owned(),
-                    body: "Replies appear here as guests open their links. Every one is also
-                           written to the audit log."
-                        .to_owned(),
+                    title: s.responses_none_title.to_owned(),
+                    body: s.responses_none_body.to_owned(),
                 }
             } else {
                 div { class: "guest-table-wrap",
                     table { class: "guest-table",
                         thead {
                             tr {
-                                th { "Guest" }
-                                th { "Reply" }
-                                th { class: "numeric", "Party" }
-                                th { "Note" }
-                                th { "When" }
+                                th { "{s.col_guest}" }
+                                th { "{s.col_reply}" }
+                                th { class: "numeric", "{s.col_party}" }
+                                th { "{s.col_note}" }
+                                th { "{s.col_when}" }
                             }
                         }
                         tbody {
@@ -1073,13 +1099,13 @@ fn ResponsesTab(token: String, event_id: i64, guests: Vec<GuestDto>) -> Element 
                                     td {
                                         if guest.status == Rsvp::Attending {
                                             Chip {
-                                                label: "Coming".to_owned(),
+                                                label: locale.status(guest.status).to_owned(),
                                                 tone: Tone::Positive,
                                                 icon: "check_circle",
                                             }
                                         } else {
                                             Chip {
-                                                label: "Declined".to_owned(),
+                                                label: locale.status(guest.status).to_owned(),
                                                 tone: Tone::Negative,
                                                 icon: "cancel_circle",
                                             }
