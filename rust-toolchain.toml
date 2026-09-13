@@ -1,4 +1,8 @@
 [toolchain]
 channel = "1.98"
 profile = "minimal"
+# Listed here rather than installed by CI: rustup resolves every cargo call
+# through this file, so a toolchain without these cannot run `cargo fmt` or
+# `cargo clippy` even when they are installed for some other channel.
+components = ["clippy", "rustfmt"]
 targets = ["wasm32-unknown-unknown"]

@@ -21,11 +21,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # The toolchain (and the wasm target) come from rust-toolchain.toml.
+      # Only to put rustup on PATH: the channel, its components and the wasm
+      # target all come from rust-toolchain.toml, which rustup applies to every
+      # cargo call regardless of what is installed here.
       - name: Setup | Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
 
       - name: Setup | Cache
         uses: Swatinem/rust-cache@v2
