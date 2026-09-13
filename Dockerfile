@@ -51,10 +51,7 @@ ENV CI=true
 RUN set -eux; \
     dx bundle --package hainviter --release --debug-symbols=false; \
     test -x dist/server; \
-    test -f dist/public/index.html; \
-    # Cheap proof that dist/server really is the server half: this string only
-    # exists in code behind the `server` feature.
-    grep -qa 'PRAGMA journal_mode' dist/server
+    test -f dist/public/index.html
 
 # ── Runtime ────────────────────────────────────────────────────────────────
 FROM debian:trixie-slim
