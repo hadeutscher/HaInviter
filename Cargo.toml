@@ -1,0 +1,49 @@
+[package]
+name = "hainviter"
+version = "0.1.0"
+authors = ["Yuval Deutscher"]
+edition = "2024"
+description = "Guest invitation and RSVP management for weddings, parties and other events"
+repository = "https://github.com/hadeutscher/HaInviter"
+publish = false
+
+# ---------------------------------------------------------------------------
+# Features
+# ---------------------------------------------------------------------------
+# `--features web`    builds the WASM browser bundle (driven by `dx`).
+# `--features server` builds the native Axum server binary.
+[features]
+default = []
+web = ["dioxus/web"]
+server = [
+    "dioxus/server",
+    "dep:axum",
+    "dep:getrandom",
+    "dep:rusqlite",
+    "dep:serde_json",
+    "dep:tokio",
+]
+
+[dependencies]
+axum = { version = "0.8", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["std", "now"] }
+dioxus = { version = "0.7", features = ["fullstack", "router"] }
+getrandom = { version = "0.3", optional = true }
+# `bundled` compiles SQLite from source: no libsqlite3 needed in the runtime
+# image, and the version is pinned to whatever we build against.
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+tokio = { version = "1", default-features = false, features = [
+    "fs",
+    "macros",
+    "rt-multi-thread",
+], optional = true }
+
+# Lean release profile: this runs on a Raspberry Pi, so trade build time for a
+# smaller, faster binary. `strip` keeps the image small.
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "unwind"
+strip = true

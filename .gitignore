@@ -1,0 +1,10 @@
+/target/
+/dist/
+**/*.rs.bk
+
+# Local runtime data (SQLite database, audit log, uploaded cover images)
+/data/
+
+.vscode/*
+!.vscode/settings.json
+.idea/

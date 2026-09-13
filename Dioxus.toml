@@ -1,0 +1,14 @@
+[application]
+name = "hainviter"
+out_dir = "dist"
+asset_dir = "assets"
+
+[web.app]
+title = "HaInviter"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "assets"]
+
+[bundle]
+identifier = "sh.deut.hainviter"
