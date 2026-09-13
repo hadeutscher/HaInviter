@@ -1,17 +1,19 @@
 # syntax=docker/dockerfile:1
 
 # ============================================================================
-# HaInviter — Alpine runtime image
+# HaInviter
 #
-# The server is cross-compiled to statically linked musl so the final image is
-# Alpine with nothing else in it: no libc to keep in step, no interpreter, no
-# package manager surface. The build itself happens on Debian, because the
-# Dioxus CLI is only published as a glibc binary and building it from source
-# would drag in an image-codec C++ toolchain we have no other use for.
+# Builder and runtime are both Debian trixie, so the server binary links
+# against the glibc it was built against and no cross-compilation is involved:
+# `dx bundle` runs exactly as it does locally.
 #
-# Images are built one architecture at a time on a native runner, so the musl
-# target always matches the host and plain `musl-gcc` can compile the bundled
-# SQLite.
+# An earlier version of this file targeted a statically linked musl binary on
+# an Alpine runtime. Getting there meant passing our own `@server --target` to
+# dx, which replaces the per-half feature sets dx infers from the Cargo.toml
+# feature names — and it shipped a "server" binary built with the *web*
+# features: no database, no routes, and a panic inside wasm-bindgen on the
+# first line of main. A ~25 MB runtime image is a good trade for not doing
+# that.
 # ============================================================================
 
 FROM rust:1.98-trixie AS builder
@@ -22,25 +24,13 @@ ARG TARGETARCH
 
 WORKDIR /src
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends musl-tools musl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Resolve the musl triple once and keep it on disk for the later stages.
-RUN set -eux; \
-    case "$TARGETARCH" in \
-      amd64) triple=x86_64-unknown-linux-musl ;; \
-      arm64) triple=aarch64-unknown-linux-musl ;; \
-      *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
-    esac; \
-    echo "$triple" > /musl-target; \
-    rustup target add "$triple"; \
-    rustup target add wasm32-unknown-unknown
-
+# The Dioxus CLI, as a prebuilt binary: building it from source would pull in
+# an image-codec C++ toolchain we have no other use for.
 RUN set -eux; \
     case "$TARGETARCH" in \
       amd64) arch=x86_64 ;; \
       arm64) arch=aarch64 ;; \
+      *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     curl -fsSL -o /tmp/dx.tar.gz \
       "https://github.com/DioxusLabs/dioxus/releases/download/v${DX_VERSION}/dx-${arch}-unknown-linux-gnu.tar.gz"; \
@@ -50,32 +40,34 @@ RUN set -eux; \
 
 COPY . .
 
-# `dx bundle` builds the WASM client and the server binary and flattens both
-# into --out-dir: the binary as `server`, the client next to it in `public/`.
-# CI=true keeps the CLI non-interactive and builds the two halves in sequence,
-# which keeps peak memory within a hosted runner.
+# Builds the WASM client and the native server and puts both in the crate's
+# dist/: the binary as `server`, the client beside it in `public/`. CI=true
+# keeps the CLI non-interactive and builds the two halves in sequence, which
+# keeps peak memory within a hosted runner.
+#
+# No feature flags and no target: dx infers both from the Cargo.toml, and
+# overriding either is what broke the first version of this image.
 ENV CI=true
 RUN set -eux; \
-    triple="$(cat /musl-target)"; \
-    upper="$(echo "$triple" | tr 'a-z-' 'A-Z_')"; \
-    lower="$(echo "$triple" | tr - _)"; \
-    export "CC_${lower}=musl-gcc"; \
-    export "CARGO_TARGET_${upper}_LINKER=musl-gcc"; \
-    dx bundle --release --debug-symbols=false --out-dir /out @server --target "$triple"; \
-    test -x /out/server; \
-    test -d /out/public
+    dx bundle --package hainviter --release --debug-symbols=false; \
+    test -x dist/server; \
+    test -f dist/public/index.html; \
+    # Cheap proof that dist/server really is the server half: this string only
+    # exists in code behind the `server` feature.
+    grep -qa 'PRAGMA journal_mode' dist/server
 
 # ── Runtime ────────────────────────────────────────────────────────────────
-FROM alpine:3.22
+FROM debian:trixie-slim
 
-# Nothing is installed: the binary is statically linked and HaInviter never
-# makes an outbound connection, so it needs neither a libc nor a CA bundle.
-RUN addgroup -S -g 10001 hainviter \
-    && adduser -S -u 10001 -G hainviter -H -D hainviter \
-    && mkdir -p /data \
-    && chown 10001:10001 /data
+# Nothing is installed on top of the base: HaInviter never opens an outbound
+# connection, so it needs no CA bundle, and it reads no timezone database.
+RUN set -eux; \
+    groupadd --system --gid 10001 hainviter; \
+    useradd --system --uid 10001 --gid 10001 --no-create-home hainviter; \
+    mkdir -p /data; \
+    chown 10001:10001 /data
 
-COPY --from=builder /out /opt/hainviter
+COPY --from=builder /src/dist /opt/hainviter
 
 # Everything that must not be lost lives under /data: mount it from the host.
 ENV HAINVITER_DATA_DIR=/data \

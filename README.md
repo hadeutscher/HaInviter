@@ -9,8 +9,8 @@ good-looking invitation page for every guest.
 - **Per-guest links** — every invitee gets `/i/<token>`, showing their name, the
   event details and a single question to answer.
 - **No accounts** — access is by unguessable link, for hosts and guests alike.
-- **Small** — a statically linked binary, SQLite, and no runtime dependencies.
-  It is meant to run on a Raspberry Pi and it does.
+- **Small** — one binary, SQLite compiled into it, and nothing installed on top
+  of the runtime image. It is meant to run on a Raspberry Pi and it does.
 
 ## How it works
 
