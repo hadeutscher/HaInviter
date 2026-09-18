@@ -24,7 +24,6 @@ server = [
     "dep:axum",
     "dep:deadpool-postgres",
     "dep:getrandom",
-    "dep:phonenumber",
     "dep:serde_json",
     "dep:tokio",
     "dep:tokio-postgres",
@@ -38,10 +37,6 @@ deadpool-postgres = { version = "0.14", default-features = false, features = [
 ], optional = true }
 dioxus = { version = "0.7", features = ["fullstack", "router"] }
 getrandom = { version = "0.3", optional = true }
-# libphonenumber's metadata, so a number written the way a contact card happens
-# to spell it normalises correctly for every country rather than for one guessed
-# one. Server-only on purpose: that metadata dwarfs the rest of the WASM bundle.
-phonenumber = { version = "0.3", optional = true }
 # rustls rather than the default native-tls: a development helper must not
 # require a system OpenSSL on every contributor's machine.
 postgresql_embedded = { version = "0.21", default-features = false, features = [
@@ -58,9 +53,6 @@ tokio = { version = "1", default-features = false, features = [
     "macros",
     "rt-multi-thread",
 ], optional = true }
-# Percent-encoding for the pre-filled share text, which is frequently Hebrew.
-# Shared by both builds, and small enough not to matter to either.
-urlencoding = "2"
 
 # Declared explicitly so the development helper can require its own feature:
 # without that, `cargo build` on a fresh checkout would try to compile it.

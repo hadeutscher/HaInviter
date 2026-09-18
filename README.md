@@ -8,8 +8,6 @@ good-looking invitation page for every guest.
   arrive, download them as CSV.
 - **Per-guest links** — every invitee gets `/i/<token>`, showing their name, the
   event details and a single question to answer.
-- **One-tap sending** — import contacts from a `.vcf`, then hand each guest's
-  invitation to WhatsApp or the system share sheet straight from their row.
 - **No accounts** — access is by unguessable link, for hosts and guests alike.
 - **English and Hebrew**, including right-to-left layout, chosen per deployment.
 - **Stateless** — everything lives in PostgreSQL, so you can run as many
@@ -27,7 +25,6 @@ apart.
 | `src/types.rs` | DTOs shared by both builds |
 | `src/i18n.rs` | the locales, both string tables, and date formatting |
 | `src/api.rs` | every server function — the whole client/server boundary |
-| `src/contacts.rs` | vCard import, E.164 numbers and the share links |
 | `src/db.rs` | PostgreSQL schema, migrations and queries |
 | `src/auth.rs` | token generation and the admin check |
 | `src/audit.rs` | the audit log |
@@ -120,7 +117,6 @@ Everything is an environment variable; there is no configuration file.
 | --- | --- | --- |
 | `HAINVITER_DATABASE_URL` | *(required)* | PostgreSQL connection string. `DATABASE_URL` is accepted as a fallback. The server exits at startup if it cannot connect. |
 | `HAINVITER_LOCALE` | `en-US` | `en-US` or `he-IL`. Sets the language and the text direction for the whole deployment. An unrecognised tag falls back to `en-US`. |
-| `HAINVITER_DEFAULT_REGION` | *(unset)* | CLDR region code, e.g. `IL`, used to read imported numbers that are not written in international form. Left unset, only `+…` numbers are accepted: guessing a country would silently invent a number nobody ever answers. |
 | `HAINVITER_BASE_URL` | *(unset)* | Public origin, e.g. `https://invites.example.com`. Used for the invitation links in the CSV export. When unset, the admin panel falls back to the browser's own origin. |
 | `HAINVITER_ADMIN_TOKEN` | *(generated)* | Pins the admin token. Leave it unset to have one generated on first startup and stored in the database. |
 | `HAINVITER_DATA_DIR` | *(unset)* | Optional. Where to write a second copy of the audit log. Give each instance its own directory — never a shared one. |
@@ -145,36 +141,6 @@ coordination and no shared filesystem:
 
 Postgres is the only thing left that holds state, and therefore the only thing
 that needs a volume and a backup.
-
-## Getting invitations to guests
-
-Invitations are sent by the host, from the host's own WhatsApp. There is no bot,
-no Meta Business account, and no outbound network call anywhere in this
-codebase.
-
-Import the guests as contact cards — select them in a phone's address book and
-share them as a `.vcf` — and every row in the guest list gains two controls:
-
-- **Send on WhatsApp** opens a `wa.me` link carrying that guest's personal
-  invitation, already written in the deployment's language. On a phone that
-  hands over to the app; on a computer it opens WhatsApp Desktop or Web. A guest
-  whose card carried no mobile number still gets a working button: WhatsApp
-  opens its own contact picker instead.
-- **Share** opens the system share sheet, for sending the same message through
-  anything else on the device. Where the Web Share API is unavailable — a plain
-  HTTP origin, or desktop Firefox — the message goes to the clipboard instead,
-  and the panel says so rather than appearing to do nothing.
-
-Using either marks that guest as sent. The marker lives in the database rather
-than in the browser, so a host who starts the list on a phone and finishes it on
-a laptop sees one set of progress; clicking it clears it again. The same links
-are in the CSV export, for anyone who would rather work down a spreadsheet.
-
-The WhatsApp Business API is deliberately not used. Messaging someone who has
-not written to you within the last 24 hours requires a pre-approved message
-template on a WhatsApp Business account, which is weeks of review to obtain and
-makes the invitation arrive from a business rather than from the hosts. Handing
-the message to the host's own WhatsApp costs one tap per guest and none of that.
 
 ## Security model
 

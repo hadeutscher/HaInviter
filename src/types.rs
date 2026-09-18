@@ -96,10 +96,6 @@ pub struct EventSummary {
 pub struct GuestDto {
     pub id: i64,
     pub name: String,
-    /// Telephone number in E.164, or empty when none was imported. Only the
-    /// server ever writes this: it is the only side carrying the metadata
-    /// needed to normalise a number correctly.
-    pub phone: String,
     /// Secret token; `/i/{token}` is this guest's personal invitation link.
     pub token: String,
     /// Largest party this guest may confirm (1 = themselves only).
@@ -110,24 +106,6 @@ pub struct GuestDto {
     pub note: String,
     /// RFC 3339 timestamp of the last reply, empty when never answered.
     pub responded_at: String,
-    /// RFC 3339 timestamp of when the host last sent this invitation, empty
-    /// when never. It is kept in the database rather than in the browser so a
-    /// host who starts the list on a phone and finishes on a laptop sees one
-    /// consistent view of their progress — and so does every replica.
-    pub invite_sent_at: String,
-}
-
-/// What importing one `.vcf` produced, reported back to the admin panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct ImportSummary {
-    /// Contacts the file turned out to contain.
-    pub found: usize,
-    /// Guests actually added; the remainder were already on the list.
-    pub added: usize,
-    /// How many of those carried no number that could be normalised. Those
-    /// guests are still invited — the host just has to reach them some other
-    /// way, so it is worth saying so rather than silently dropping the number.
-    pub without_phone: usize,
 }
 
 /// An event plus its full guest list.

@@ -681,29 +681,15 @@ fn GuestsTab(
     let s = t();
     let locale = active();
     let tok = use_signal(|| token);
-    let mut origin = use_signal(|| base_url);
+    let origin = use_signal(|| base_url);
     let mut toast = toast;
     let mut reload = reload;
-
-    // `HAINVITER_BASE_URL` when it is set, and the browser's own origin
-    // otherwise. Resolved once, here, because the WhatsApp control needs a
-    // complete URL in its `href` at render time rather than in a click handler.
-    let _origin_resolved = use_future(move || async move {
-        if origin.peek().trim().is_empty()
-            && let Ok(value) = document::eval("return location.origin;").await
-            && let Some(text) = value.as_str()
-        {
-            origin.set(text.to_owned());
-        }
-    });
 
     let mut bulk = use_signal(String::new);
     let mut default_party = use_signal(|| "1".to_owned());
     let mut adding = use_signal(|| false);
-    let mut importing = use_signal(|| false);
     let mut editing: Signal<Option<GuestDto>> = use_signal(|| None);
     let mut edit_name = use_signal(String::new);
-    let mut edit_phone = use_signal(String::new);
     let mut edit_party = use_signal(|| "1".to_owned());
     let mut removing: Signal<Option<GuestDto>> = use_signal(|| None);
 
@@ -732,62 +718,13 @@ fn GuestsTab(
         });
     };
 
-    let import = move |event: FormEvent| {
-        let Some(file) = event.files().first().cloned() else {
-            return;
-        };
-        // Checked here as well as on the server so an accidental photo fails
-        // before it is read into memory and shipped over the wire.
-        if file.size() > api::MAX_VCF_BYTES as u64 {
-            toast.set(Some((
-                s.field_cover_too_large
-                    .replace("{}", &(api::MAX_VCF_BYTES / (1024 * 1024)).to_string()),
-                true,
-            )));
-            return;
-        }
-        let size = default_party().parse::<i64>().unwrap_or(1);
-        importing.set(true);
-        spawn(async move {
-            match file.read_bytes().await {
-                Ok(bytes) => {
-                    match api::import_contacts(tok(), event_id, bytes.to_vec(), size).await {
-                        Ok(summary) => {
-                            let mut text = s
-                                .guests_imported
-                                .replace("{found}", &summary.found.to_string())
-                                .replace("{added}", &summary.added.to_string());
-                            // Worth saying out loud: those guests exist but
-                            // cannot be reached from their row.
-                            if summary.without_phone > 0 {
-                                text.push(' ');
-                                text.push_str(
-                                    &s.guests_import_no_phone
-                                        .replace("{n}", &summary.without_phone.to_string()),
-                                );
-                            }
-                            toast.set(Some((text, false)));
-                            reload.restart();
-                        }
-                        Err(e) => toast.set(Some((message_of(&e), true))),
-                    }
-                }
-                Err(e) => {
-                    toast.set(Some((format!("{} ({e})", s.field_cover_unreadable), true)));
-                }
-            }
-            importing.set(false);
-        });
-    };
-
     let save_edit = move |_| {
         let Some(guest) = editing() else { return };
         let name = edit_name();
-        let phone = edit_phone();
         let size = edit_party().parse::<i64>().unwrap_or(1);
         spawn(async move {
-            match api::update_guest(tok(), guest.id, name, size, phone).await {
-                Ok(_) => {
+            match api::update_guest(tok(), guest.id, name, size).await {
+                Ok(()) => {
                     editing.set(None);
                     reload.restart();
                 }
@@ -831,30 +768,10 @@ fn GuestsTab(
                     onchange: move |e: FormEvent| default_party.set(e.value()),
                 }
                 div { class: "spacer" }
-                // A styled <label> opens the file picker without JavaScript, the
-                // same way the cover image does.
-                label { r#for: "vcf-file", class: "md-button md-button--outlined",
-                    Icon { name: "upload" }
-                    span { class: "md-button__label",
-                        if importing() {
-                            "{s.guests_importing}"
-                        } else {
-                            "{s.guests_import_button}"
-                        }
-                    }
-                }
-                input {
-                    id: "vcf-file",
-                    class: "file-input",
-                    r#type: "file",
-                    accept: ".vcf,text/vcard,text/x-vcard,text/directory",
-                    onchange: import,
-                }
                 Button { icon: "add", disabled: adding(), onclick: add,
                     if adding() { "{s.guests_adding}" } else { "{s.guests_add_button}" }
                 }
             }
-            p { class: "md-body-small md-on-surface-variant", "{s.guests_import_help}" }
         }
 
         section { class: "md-card md-card--elevated stack",
@@ -891,7 +808,6 @@ fn GuestsTab(
                                     origin: origin(),
                                     on_edit: move |g: GuestDto| {
                                         edit_name.set(g.name.clone());
-                                        edit_phone.set(g.phone.clone());
                                         edit_party.set(g.max_party_size.to_string());
                                         editing.set(Some(g));
                                     },
@@ -911,8 +827,6 @@ fn GuestsTab(
                                         reload.restart();
                                     },
                                     on_error: move |text| toast.set(Some((text, true))),
-                                    on_sent: move |_| reload.restart(),
-                                    on_message: move |text| toast.set(Some((text, false))),
                                     token: tok(),
                                 }
                             }
@@ -938,13 +852,6 @@ fn GuestsTab(
                 label: s.guests_name.to_owned(),
                 value: edit_name(),
                 oninput: move |e: FormEvent| edit_name.set(e.value()),
-            }
-            TextField {
-                label: s.guests_phone.to_owned(),
-                value: edit_phone(),
-                input_type: "tel".to_owned(),
-                supporting: s.guests_phone_help.to_owned(),
-                oninput: move |e: FormEvent| edit_phone.set(e.value()),
             }
             SelectField {
                 label: s.guests_may_bring.to_owned(),
@@ -992,10 +899,6 @@ fn GuestRow(
     on_reissued: EventHandler<String>,
     on_reset: EventHandler<String>,
     on_error: EventHandler<String>,
-    /// Called once this guest's sent marker has changed, so the list reloads.
-    on_sent: EventHandler<()>,
-    /// An informational message for the host — not an error.
-    on_message: EventHandler<String>,
 ) -> Element {
     let s = t();
     let locale = active();
@@ -1006,77 +909,6 @@ fn GuestRow(
         Rsvp::Attending => (Tone::Positive, "check_circle"),
         Rsvp::Declined => (Tone::Negative, "cancel_circle"),
         Rsvp::Pending => (Tone::Waiting, "schedule"),
-    };
-
-    // Built here rather than in a click handler so the WhatsApp control can be a
-    // real link: an `href` is immune to popup blocking, and on a phone it hands
-    // straight to the installed app.
-    let link = crate::contacts::invite_link(&origin, &guest.token);
-    let message = crate::contacts::invite_message(s.invite_message, &guest.name, &link);
-    let whatsapp_url = crate::contacts::wa_me(&guest.phone, &message);
-
-    let mark_sent = move |_| {
-        spawn(async move {
-            match api::mark_invite_sent(tok(), id, true).await {
-                Ok(_) => on_sent.call(()),
-                Err(e) => on_error.call(message_of(&e)),
-            }
-        });
-    };
-
-    let clear_sent = move |_| {
-        spawn(async move {
-            match api::mark_invite_sent(tok(), id, false).await {
-                Ok(_) => on_sent.call(()),
-                Err(e) => on_error.call(message_of(&e)),
-            }
-        });
-    };
-
-    let share = {
-        let message = message.clone();
-        move |_| {
-            let message = message.clone();
-            spawn(async move {
-                // Web Share is the right mechanism — it reaches every app on the
-                // device rather than the ones we happened to think of — but it
-                // exists only on a secure origin, and desktop Firefox has no
-                // share sheet at all. The clipboard is the honest fallback, and
-                // the host is told which of the two actually happened.
-                let script = format!(
-                    "const text = {}; \
-                     if (navigator.share) {{ \
-                         try {{ await navigator.share({{ text }}); return \"shared\"; }} \
-                         catch (e) {{ \
-                             if (e && e.name === \"AbortError\") return \"cancelled\"; \
-                         }} \
-                     }} \
-                     try {{ await navigator.clipboard.writeText(text); return \"copied\"; }} \
-                     catch (e) {{ return \"failed\"; }}",
-                    js_string(&message),
-                );
-                let evaluated = document::eval(&script).await;
-                let outcome = evaluated
-                    .as_ref()
-                    .ok()
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("failed");
-                match outcome {
-                    // The host dismissed the sheet; nothing was sent.
-                    "cancelled" => {}
-                    "failed" => on_error.call(s.err_share_failed.to_owned()),
-                    handed_off => {
-                        if handed_off == "copied" {
-                            on_message.call(s.share_copied.to_owned());
-                        }
-                        match api::mark_invite_sent(tok(), id, true).await {
-                            Ok(_) => on_sent.call(()),
-                            Err(e) => on_error.call(message_of(&e)),
-                        }
-                    }
-                }
-            });
-        }
     };
 
     let reissue = {
@@ -1118,24 +950,6 @@ fn GuestRow(
                             .replace("{}", &crate::types::format_timestamp(&guest.responded_at))}
                     }
                 }
-                if !guest.phone.is_empty() {
-                    span { class: "guest-table__note", dir: "ltr", "{guest.phone}" }
-                }
-                if !guest.invite_sent_at.is_empty() {
-                    // The marker doubles as the control that clears it, so
-                    // tracking who has been messaged costs the row no further
-                    // button.
-                    button {
-                        class: "guest-table__note guest-table__sent",
-                        r#type: "button",
-                        title: "{s.action_mark_unsent}",
-                        onclick: clear_sent,
-                        {s.guests_sent_at.replace(
-                            "{}",
-                            &crate::types::format_timestamp(&guest.invite_sent_at),
-                        )}
-                    }
-                }
             }
             td {
                 Chip { label: locale.status(guest.status).to_owned(), tone, icon }
@@ -1163,21 +977,6 @@ fn GuestRow(
             }
             td {
                 div { class: "guest-table__actions",
-                    a {
-                        class: "md-icon-button",
-                        href: "{whatsapp_url}",
-                        target: "_blank",
-                        rel: "noopener",
-                        title: "{s.action_send_whatsapp}",
-                        "aria-label": "{s.action_send_whatsapp}",
-                        onclick: mark_sent,
-                        Icon { name: "whatsapp" }
-                    }
-                    IconButton {
-                        icon: "share",
-                        label: s.action_share.to_owned(),
-                        onclick: share,
-                    }
                     IconButton {
                         icon: "edit",
                         label: s.action_edit_guest.to_owned(),

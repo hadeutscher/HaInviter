@@ -6,31 +6,22 @@ use crate::types::GuestDto;
 ///
 /// The output starts with a UTF-8 BOM so Excel opens non-ASCII guest names
 /// correctly, which is the whole point of downloading the file.
-///
-/// `invite_template` is the locale's invitation message; it is rendered per
-/// guest into a ready `wa.me` link, so a host who would rather work down a
-/// spreadsheet than the admin panel sends exactly the same wording.
-pub fn responses_csv(guests: &[GuestDto], base_url: &str, invite_template: &str) -> String {
+pub fn responses_csv(guests: &[GuestDto], base_url: &str) -> String {
     let mut out = String::from("\u{feff}");
     out.push_str(
-        "guest_id,name,phone,status,party_size,max_party_size,note,responded_at,invite_link,\
-         whatsapp_link,invite_sent_at\r\n",
+        "guest_id,name,status,party_size,max_party_size,note,responded_at,invite_link\r\n",
     );
     for g in guests {
-        let link = crate::contacts::invite_link(base_url, &g.token);
-        let message = crate::contacts::invite_message(invite_template, &g.name, &link);
+        let link = format!("{}/i/{}", base_url.trim_end_matches('/'), g.token);
         let row = [
             g.id.to_string(),
             g.name.clone(),
-            g.phone.clone(),
             g.status.as_str().to_owned(),
             g.party_size.to_string(),
             g.max_party_size.to_string(),
             g.note.clone(),
             g.responded_at.clone(),
             link,
-            crate::contacts::wa_me(&g.phone, &message),
-            g.invite_sent_at.clone(),
         ];
         out.push_str(&row.map(|f| escape(&f)).join(","));
         out.push_str("\r\n");
@@ -86,37 +77,29 @@ mod tests {
     use super::*;
     use crate::types::Rsvp;
 
-    const TEMPLATE: &str = "Hi {name}! Your invitation: {link}";
-
     fn guest(name: &str, note: &str) -> GuestDto {
         GuestDto {
             id: 7,
             name: name.to_owned(),
-            phone: "+972501234567".to_owned(),
             token: "abc123".to_owned(),
             max_party_size: 2,
             status: Rsvp::Attending,
             party_size: 2,
             note: note.to_owned(),
             responded_at: "2026-09-12T19:04:00+00:00".to_owned(),
-            invite_sent_at: String::new(),
         }
     }
 
     #[test]
     fn csv_starts_with_a_bom_and_a_header() {
-        let csv = responses_csv(&[], "https://x.test", TEMPLATE);
+        let csv = responses_csv(&[], "https://x.test");
         assert!(csv.starts_with('\u{feff}'));
-        assert!(csv.contains("guest_id,name,phone,status"));
+        assert!(csv.contains("guest_id,name,status"));
     }
 
     #[test]
     fn csv_quotes_fields_containing_separators() {
-        let csv = responses_csv(
-            &[guest("Cohen, Dana", "says \"hi\"")],
-            "https://x.test/",
-            TEMPLATE,
-        );
+        let csv = responses_csv(&[guest("Cohen, Dana", "says \"hi\"")], "https://x.test/");
         assert!(csv.contains("\"Cohen, Dana\""));
         assert!(csv.contains("\"says \"\"hi\"\"\""));
     }
@@ -124,21 +107,13 @@ mod tests {
     #[test]
     fn csv_neutralises_spreadsheet_formulas() {
         // A name beginning with '=' must not be evaluated when the file is opened.
-        let csv = responses_csv(&[guest("=1+1", "")], "https://x.test", TEMPLATE);
+        let csv = responses_csv(&[guest("=1+1", "")], "https://x.test");
         assert!(csv.contains("\"'=1+1\""));
     }
 
     #[test]
-    fn csv_carries_a_ready_whatsapp_link() {
-        let csv = responses_csv(&[guest("Dana", "")], "https://x.test", TEMPLATE);
-        // The number loses its '+' in a wa.me path, and the message is encoded.
-        assert!(csv.contains("https://wa.me/972501234567?text="));
-        assert!(csv.contains("Dana"));
-    }
-
-    #[test]
     fn csv_includes_the_full_invitation_link() {
-        let csv = responses_csv(&[guest("Dana", "")], "https://x.test/", TEMPLATE);
+        let csv = responses_csv(&[guest("Dana", "")], "https://x.test/");
         assert!(csv.contains("https://x.test/i/abc123"));
     }
 

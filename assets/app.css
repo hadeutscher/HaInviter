@@ -588,20 +588,3 @@
 /* An anchor styled as a Material button (used for real file downloads). */
 a.md-button { text-decoration: none; }
 .md-snackbar { cursor: pointer; }
-
-/* The "sent" marker under a guest's name doubles as the control that clears it,
-   so tracking who has been messaged costs no extra button in a crowded row. */
-.guest-table__sent {
-  appearance: none;
-  background: none;
-  border: 0;
-  padding: 0;
-  font: inherit;
-  color: var(--md-sys-color-primary);
-  cursor: pointer;
-  text-align: start;
-}
-
-.guest-table__sent:hover {
-  text-decoration: line-through;
-}

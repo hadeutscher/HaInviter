@@ -225,107 +225,13 @@ async fn an_event_can_be_created_invited_to_and_answered() {
     assert!(api::get_invite(dana.token.clone()).await.is_err());
     assert!(api::get_invite(fresh.clone()).await.is_ok());
 
-    // ── Importing contacts out of a shared .vcf ────────────────────────────
-    // No default region is configured, so only a number already written in
-    // international form is accepted — which is the safe half of that rule.
-    let vcf = "BEGIN:VCARD\nVERSION:3.0\nFN:Roni Levi\nTEL;TYPE=CELL:+972 50-123-4567\nEND:VCARD\n\
-               BEGIN:VCARD\nVERSION:3.0\nFN:No Number\nEND:VCARD\n";
-    let imported = api::import_contacts(admin.clone(), event_id, vcf.as_bytes().to_vec(), 2)
-        .await
-        .expect("a .vcf should import");
-    assert_eq!(imported.found, 2);
-    assert_eq!(imported.added, 2);
-    assert_eq!(
-        imported.without_phone, 1,
-        "the card with no TEL should be reported, and the guest still added"
-    );
-
-    let view = api::get_event(admin.clone(), event_id)
-        .await
-        .expect("event");
-    let roni = view
-        .guests
-        .iter()
-        .find(|g| g.name == "Roni Levi")
-        .expect("Roni should have been imported")
-        .clone();
-    assert_eq!(
-        roni.phone, "+972501234567",
-        "an imported number should be stored in E.164"
-    );
-
-    // The same file twice must not duplicate anyone, and must not report the
-    // phone backfill as a new guest.
-    let again = api::import_contacts(admin.clone(), event_id, vcf.as_bytes().to_vec(), 2)
-        .await
-        .expect("a second import should be accepted");
-    assert_eq!(again.added, 0, "re-importing must add nobody");
-    assert!(
-        api::import_contacts(admin.clone(), event_id, b"not a vcard".to_vec(), 1)
-            .await
-            .is_err(),
-        "a file with no cards in it must be refused"
-    );
-
-    // ── Numbers typed by hand go through the same normalisation ────────────
-    let stored = api::update_guest(
-        admin.clone(),
-        roni.id,
-        "Roni Levi".to_owned(),
-        2,
-        "+972 52 999 8888".to_owned(),
-    )
-    .await
-    .expect("a valid number should be accepted");
-    assert_eq!(stored, "+972529998888");
-    assert!(
-        api::update_guest(
-            admin.clone(),
-            roni.id,
-            "Roni Levi".to_owned(),
-            2,
-            "banana".to_owned(),
-        )
-        .await
-        .is_err(),
-        "an unparseable number must be refused rather than stored"
-    );
-
-    // ── The host's own record of who has been messaged ─────────────────────
-    let sent_at = api::mark_invite_sent(admin.clone(), roni.id, true)
-        .await
-        .expect("marking sent should work");
-    assert!(!sent_at.is_empty());
-    let marked = api::get_event(admin.clone(), event_id)
-        .await
-        .expect("event")
-        .guests
-        .iter()
-        .find(|g| g.id == roni.id)
-        .expect("Roni")
-        .invite_sent_at
-        .clone();
-    assert_eq!(marked, sent_at, "the marker must survive a round trip");
-    assert!(
-        api::mark_invite_sent(admin.clone(), roni.id, false)
-            .await
-            .expect("unmarking should work")
-            .is_empty(),
-        "clearing the marker should store nothing"
-    );
-
     // ── The export ─────────────────────────────────────────────────────────
     let view = api::get_event(admin.clone(), event_id)
         .await
         .expect("event");
-    let csv = export::responses_csv(&view.guests, "https://invites.test", "{name}: {link}");
-    // Dana has no number, so her phone column is empty.
-    assert!(csv.contains("Dana,,declined"));
+    let csv = export::responses_csv(&view.guests, "https://invites.test");
+    assert!(csv.contains("Dana,declined"));
     assert!(csv.contains(&format!("https://invites.test/i/{fresh}")));
-    assert!(
-        csv.contains("https://wa.me/972529998888?text="),
-        "a guest with a number should get a ready wa.me link"
-    );
 
     // ── The audit trail ────────────────────────────────────────────────────
     let log = std::fs::read_to_string(audit::log_path().expect("a configured log path"))
@@ -333,8 +239,6 @@ async fn an_event_can_be_created_invited_to_and_answered() {
     assert!(log.contains(r#""kind":"event_created""#));
     assert!(log.contains(r#""kind":"guests_added""#));
     assert!(log.contains(r#""kind":"cover_uploaded""#));
-    assert!(log.contains(r#""kind":"contacts_imported""#));
-    assert!(log.contains(r#""kind":"invite_marked_sent""#));
     assert!(log.contains(r#""kind":"rsvp""#));
     assert!(log.contains("no nuts please"));
     // Both of Dana's answers are kept, not just the latest.
