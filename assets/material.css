@@ -431,6 +431,24 @@ h1, h2, h3, h4 {
 .md-field__input:not(:placeholder-shown) ~ .md-field__label,
 .md-field--raised .md-field__label {
   transform: translateY(-0.7rem) scale(0.75);
+  /* The scale is a transform, so the label still takes its full-size width in
+     layout and would wrap — over the field's own value — well before its
+     painted self runs out of room. It is the painted width the field reserves
+     below, so keep the raised label on one line. */
+  white-space: nowrap;
+}
+
+/* Reserves the raised label's width inside the field: same font size as the
+   scaled label, plus the padding that keeps it clear of the edges and of the
+   trailing icon. Contributes width only — never height, never ink. */
+.md-field__sizer {
+  display: block;
+  height: 0;
+  padding-inline: 1rem 2.5rem;
+  font-size: 0.75rem;
+  line-height: 0;
+  white-space: nowrap;
+  visibility: hidden;
 }
 
 .md-field:focus-within .md-field__label { color: var(--md-primary); }

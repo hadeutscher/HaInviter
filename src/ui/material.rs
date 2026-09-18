@@ -305,6 +305,10 @@ pub fn SelectField(
                     }
                 }
                 span { class: "md-field__label", "{label}" }
+                // The floating label is positioned out of flow, so a select
+                // whose options are narrower than its label cannot size itself
+                // to hold it. This unseen copy sits in flow and does.
+                span { class: "md-field__sizer", "aria-hidden": "true", "{label}" }
                 Icon { name: "expand_more", class: "md-field__trailing".to_owned() }
             }
         }
