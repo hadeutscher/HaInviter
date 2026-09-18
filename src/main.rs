@@ -120,6 +120,17 @@ async fn main() {
         locale.tag(),
         locale.dir().to_uppercase()
     );
+    // Worth printing: it decides whether a number written `054-…` on a contact
+    // card can be read at all, and it is derived rather than set outright.
+    let region = contacts::default_region();
+    println!(
+        "hainviter: reading imported phone numbers as {}",
+        if region.is_empty() {
+            "international only (no region)".to_owned()
+        } else {
+            region
+        }
+    );
     match audit::log_path() {
         Some(path) => println!("hainviter: audit log at {}", path.display()),
         None => println!(

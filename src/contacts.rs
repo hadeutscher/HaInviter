@@ -294,14 +294,31 @@ pub fn to_e164(raw: &str, region: &str) -> Option<String> {
     Some(parsed.format().mode(Mode::E164).to_string())
 }
 
-/// The region used to read numbers that are not in international form, from
-/// `HAINVITER_DEFAULT_REGION`. Empty — the default — accepts only `+…` numbers.
+/// The region used to read numbers that are not in international form.
+///
+/// `HAINVITER_DEFAULT_REGION` wins when it is set. Otherwise it comes from the
+/// deployment's locale, which already names a country: `he-IL` is serving
+/// Israeli guests, and an Israeli address book writes `054-000-0000`, not
+/// `+972…`. Requiring a second variable to say what the first one already
+/// implied only means most imported numbers are silently dropped, since a
+/// contact card is exactly where numbers are stored in national form.
+///
+/// Set it explicitly when the two genuinely differ — a deployment serving
+/// English to guests whose numbers are Israeli.
 #[cfg(feature = "server")]
 pub fn default_region() -> String {
-    std::env::var("HAINVITER_DEFAULT_REGION")
+    if let Ok(region) = std::env::var("HAINVITER_DEFAULT_REGION")
+        && !region.trim().is_empty()
+    {
+        return region.trim().to_ascii_uppercase();
+    }
+    // The region subtag of a language tag: `he-IL` -> `IL`.
+    crate::i18n::from_env()
+        .tag()
+        .rsplit('-')
+        .next()
         .unwrap_or_default()
-        .trim()
-        .to_owned()
+        .to_ascii_uppercase()
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +481,41 @@ mod tests {
     #[test]
     fn refuses_something_that_is_not_a_number() {
         assert_eq!(to_e164("banana", "IL"), None);
+    }
+
+    /// Every shape an exported Israeli address book turned out to contain.
+    ///
+    /// Placeholders, not the numbers the shapes were taken from. Only one card
+    /// in that export wrote its number in international form; the rest were
+    /// national, which is how a phone stores them. Read against the
+    /// deployment's own region they all resolve, and that is the whole reason
+    /// the region defaults rather than staying empty.
+    #[test]
+    fn reads_an_israeli_address_book() {
+        for (raw, expected) in [
+            ("052-000-0000", "+972520000000"),
+            ("+972550000000", "+972550000000"),
+            ("054-000-0000", "+972540000000"),
+            ("054-000-1111", "+972540001111"),
+            ("+972 4-000-0000", "+97240000000"),
+            ("04-000-1111", "+97240001111"),
+        ] {
+            assert_eq!(
+                to_e164(raw, "IL").as_deref(),
+                Some(expected),
+                "{raw} should normalise"
+            );
+        }
+    }
+
+    /// A card carrying both a mobile and a landline yields the mobile, even
+    /// when the landline is the tidier-looking number. The link opens a
+    /// WhatsApp chat, and a landline has no WhatsApp account.
+    #[test]
+    fn a_landline_never_displaces_a_mobile() {
+        let raw = "BEGIN:VCARD\nFN:Someone\nTEL;TYPE=CELL:052-000-0000\n\
+                   TEL;TYPE=HOME:+972 4-000-0000\nEND:VCARD\n";
+        assert_eq!(parse_vcards(raw)[0].phone, "052-000-0000");
     }
 
     #[test]

@@ -155,7 +155,7 @@ Everything is an environment variable; there is no configuration file.
 | --- | --- | --- |
 | `HAINVITER_DATABASE_URL` | *(required)* | PostgreSQL connection string. `DATABASE_URL` is accepted as a fallback. The server exits at startup if it cannot connect. |
 | `HAINVITER_LOCALE` | `en-US` | `en-US` or `he-IL`. Sets the language and the text direction for the whole deployment. An unrecognised tag falls back to `en-US`. |
-| `HAINVITER_DEFAULT_REGION` | *(unset)* | CLDR region code, e.g. `IL`, used to read imported numbers that are not written in international form. Left unset, only `+…` numbers are accepted: guessing a country would silently invent a number nobody ever answers. |
+| `HAINVITER_DEFAULT_REGION` | *(from `HAINVITER_LOCALE`)* | CLDR region code, e.g. `IL`, used to read imported numbers that are not written in international form — which is how a phone's address book stores nearly all of them. Defaults to the locale's own region, so `he-IL` reads `054-000-0000` as `+972540000000`. Set it only where the two genuinely differ, such as an English deployment whose guests have Israeli numbers. |
 | `HAINVITER_BASE_URL` | *(unset)* | Public origin, e.g. `https://invites.example.com`. Used for the invitation links in the CSV export. When unset, the admin panel falls back to the browser's own origin. |
 | `HAINVITER_ADMIN_TOKEN` | *(generated)* | Pins the admin token. Leave it unset to have one generated on first startup and stored in the database. |
 | `HAINVITER_DATA_DIR` | *(unset)* | Optional. Where to write a second copy of the audit log. Give each instance its own directory — never a shared one. |
