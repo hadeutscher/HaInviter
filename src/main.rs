@@ -12,6 +12,7 @@
 mod api;
 mod contacts;
 mod i18n;
+mod seating;
 mod types;
 mod ui;
 
@@ -29,7 +30,7 @@ mod tests;
 
 use dioxus::prelude::*;
 use i18n::Locale;
-use ui::{AdminEvent, AdminEvents, Home, Invite, NotFound};
+use ui::{AdminEvent, AdminEvents, Home, Invite, NotFound, SeatingTarget, SeatingWindow};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -71,6 +72,11 @@ fn App() -> Element {
         _ => Locale::default(),
     };
     provide_context(locale);
+    // Which event's seating chart is open, if any. It lives at the root rather
+    // than on the event screen because the chart's drawing surface must outlive
+    // any one route: the browser gives a page exactly one GPU event loop, and it
+    // is bound to the canvas it was created with.
+    provide_context(use_signal(|| None::<SeatingTarget>));
 
     rsx! {
         document::Link { rel: "icon", href: asset!("/assets/favicon.ico") }
@@ -80,6 +86,7 @@ fn App() -> Element {
         // the browser uses to lay out mixed Hebrew and Latin text correctly.
         div { class: "app-root", dir: locale.dir(), lang: locale.lang(),
             Router::<Route> {}
+            SeatingWindow {}
         }
     }
 }
@@ -171,7 +178,8 @@ async fn main() {
     axum::serve(listener, router).await.unwrap();
 }
 
-/// Serves one uploaded cover image out of the database.
+/// Serves one uploaded image — a cover photograph or a venue plan — out of the
+/// database.
 #[cfg(feature = "server")]
 async fn serve_upload(
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -199,7 +207,7 @@ async fn serve_upload(
             return (StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response();
         }
     };
-    match db::load_cover(&**client, &name).await {
+    match db::load_image(&**client, &name).await {
         Ok(Some((content_type, bytes))) => (
             [
                 (header::CONTENT_TYPE, content_type),

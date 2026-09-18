@@ -8,9 +8,13 @@ use crate::{
     Route, api,
     i18n::{active, t},
     types::{EventAdminView, EventInput, EventSummary, GuestDto, Rsvp},
-    ui::material::{
-        Button, ButtonKind, Chip, Dialog, EmptyState, Fab, Icon, IconButton, Loading, SelectField,
-        Snackbar, Stat, Switch, TextArea, TextField, Tone,
+    ui::{
+        SeatingTarget,
+        material::{
+            Button, ButtonKind, Chip, Dialog, EmptyState, Fab, Icon, IconButton, Loading,
+            SelectField, Snackbar, Stat, Switch, TextArea, TextField, Tone,
+        },
+        message_of,
     },
 };
 use dioxus::prelude::*;
@@ -21,14 +25,6 @@ use dioxus::prelude::*;
 
 /// A transient message with a colour.
 type Toast = Option<(String, bool)>;
-
-/// Extracts the human-readable part of a server-function error.
-fn message_of(error: &ServerFnError) -> String {
-    let text = error.to_string();
-    text.rsplit_once(": ")
-        .map(|(_, tail)| tail.to_owned())
-        .unwrap_or(text)
-}
 
 /// Escapes a string for interpolation into a JavaScript source snippet.
 fn js_string(value: &str) -> String {
@@ -294,6 +290,103 @@ pub fn AdminEvents(token: String) -> Element {
 // Event editor fields
 // ---------------------------------------------------------------------------
 
+/// A picture attached to an event: a preview, an upload button, and the URL it
+/// resolves to.
+///
+/// One component for both pictures an event carries — the cover photograph and
+/// the plan of the venue — because from here they are the same thing: bytes that
+/// go to the server and come back as a path. `input_id` exists only so that the
+/// two file pickers on one form have distinct labels to be opened by.
+#[component]
+fn ImageField(
+    token: String,
+    label: String,
+    input_id: &'static str,
+    value: String,
+    #[props(default)] supporting: String,
+    on_change: EventHandler<String>,
+) -> Element {
+    let s = t();
+    let tok = use_signal(|| token);
+    let mut uploading = use_signal(|| false);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+
+    let pick = move |event: FormEvent| {
+        let Some(file) = event.files().first().cloned() else {
+            return;
+        };
+        // Checked here as well as on the server so an oversized photo fails
+        // before it is read into memory and shipped over the wire.
+        if file.size() > api::MAX_IMAGE_BYTES as u64 {
+            error.set(Some(s.field_image_too_large.replace(
+                "{}",
+                &(api::MAX_IMAGE_BYTES / (1024 * 1024)).to_string(),
+            )));
+            return;
+        }
+        let name = file.name();
+        uploading.set(true);
+        error.set(None);
+        spawn(async move {
+            match file.read_bytes().await {
+                Ok(bytes) => match api::upload_image(tok(), name, bytes.to_vec()).await {
+                    Ok(url) => on_change.call(url),
+                    Err(e) => error.set(Some(message_of(&e))),
+                },
+                Err(e) => error.set(Some(format!("{} ({e})", s.field_file_unreadable))),
+            }
+            uploading.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "stack",
+            span { class: "md-label-large md-on-surface-variant", "{label}" }
+            if !supporting.is_empty() {
+                span { class: "md-field__supporting", "{supporting}" }
+            }
+            div { class: "cover-preview",
+                if value.is_empty() {
+                    img { src: "", alt: "" }
+                } else {
+                    img { src: "{value}", alt: "{label}" }
+                }
+                div { class: "inline-actions",
+                    // A styled <label> opens the file picker without JavaScript.
+                    label { r#for: "{input_id}", class: "md-button md-button--outlined",
+                        Icon { name: "upload" }
+                        span { class: "md-button__label",
+                            if uploading() { "{s.field_image_uploading}" } else { "{s.field_image_upload}" }
+                        }
+                    }
+                    input {
+                        id: "{input_id}",
+                        class: "file-input",
+                        r#type: "file",
+                        accept: "image/png,image/jpeg,image/gif,image/webp",
+                        onchange: pick,
+                    }
+                    if !value.is_empty() {
+                        Button {
+                            kind: ButtonKind::Text,
+                            onclick: move |_| on_change.call(String::new()),
+                            "{s.field_image_remove}"
+                        }
+                    }
+                }
+            }
+            TextField {
+                label: s.field_image_url.to_owned(),
+                value: value.clone(),
+                oninput: move |e: FormEvent| on_change.call(e.value()),
+            }
+            if let Some(text) = error() {
+                span { class: "invite__error", Icon { name: "error" } "{text}" }
+            }
+        }
+    }
+}
+
 /// The editable fields of an event, shared by the create dialog and the event
 /// screen's "Details" tab.
 #[component]
@@ -301,37 +394,7 @@ fn EventFields(token: String, form: Signal<EventInput>) -> Element {
     let s = t();
     let tok = use_signal(|| token);
     let mut form = form;
-    let mut uploading = use_signal(|| false);
-    let mut upload_error: Signal<Option<String>> = use_signal(|| None);
     let current = form();
-
-    let pick_cover = move |event: FormEvent| {
-        let Some(file) = event.files().first().cloned() else {
-            return;
-        };
-        // Checked here as well as on the server so an oversized photo fails
-        // before it is read into memory and shipped over the wire.
-        if file.size() > 8 * 1024 * 1024 {
-            upload_error.set(Some(
-                s.field_cover_too_large
-                    .replace("{}", &(api::MAX_COVER_BYTES / (1024 * 1024)).to_string()),
-            ));
-            return;
-        }
-        let name = file.name();
-        uploading.set(true);
-        upload_error.set(None);
-        spawn(async move {
-            match file.read_bytes().await {
-                Ok(bytes) => match api::upload_cover(tok(), name, bytes.to_vec()).await {
-                    Ok(url) => form.with_mut(|f| f.cover_image = url),
-                    Err(e) => upload_error.set(Some(message_of(&e))),
-                },
-                Err(e) => upload_error.set(Some(format!("{} ({e})", s.field_cover_unreadable))),
-            }
-            uploading.set(false);
-        });
-    };
 
     rsx! {
         div { class: "form-grid",
@@ -382,45 +445,23 @@ fn EventFields(token: String, form: Signal<EventInput>) -> Element {
                     oninput: move |e: FormEvent| form.with_mut(|f| f.description = e.value()),
                 }
             }
-            div { class: "form-span-2 stack",
-                span { class: "md-label-large md-on-surface-variant", "{s.field_cover}" }
-                div { class: "cover-preview",
-                    if current.cover_image.is_empty() {
-                        img { src: "", alt: "" }
-                    } else {
-                        img { src: "{current.cover_image}", alt: "{s.field_cover_preview_alt}" }
-                    }
-                    div { class: "inline-actions",
-                        // A styled <label> opens the file picker without JavaScript.
-                        label { r#for: "cover-file", class: "md-button md-button--outlined",
-                            Icon { name: "upload" }
-                            span { class: "md-button__label",
-                                if uploading() { "{s.field_cover_uploading}" } else { "{s.field_cover_upload}" }
-                            }
-                        }
-                        input {
-                            id: "cover-file",
-                            class: "file-input",
-                            r#type: "file",
-                            accept: "image/png,image/jpeg,image/gif,image/webp",
-                            onchange: pick_cover,
-                        }
-                        if !current.cover_image.is_empty() {
-                            Button {
-                                kind: ButtonKind::Text,
-                                onclick: move |_| form.with_mut(|f| f.cover_image = String::new()),
-                                "{s.field_cover_remove}"
-                            }
-                        }
-                    }
-                }
-                TextField {
-                    label: s.field_cover_url.to_owned(),
+            div { class: "form-span-2",
+                ImageField {
+                    token: tok(),
+                    label: s.field_cover.to_owned(),
+                    input_id: "cover-file",
                     value: current.cover_image.clone(),
-                    oninput: move |e: FormEvent| form.with_mut(|f| f.cover_image = e.value()),
+                    on_change: move |url| form.with_mut(|f| f.cover_image = url),
                 }
-                if let Some(text) = upload_error() {
-                    span { class: "invite__error", Icon { name: "error" } "{text}" }
+            }
+            div { class: "form-span-2",
+                ImageField {
+                    token: tok(),
+                    label: s.field_venue.to_owned(),
+                    supporting: s.field_venue_help.to_owned(),
+                    input_id: "venue-file",
+                    value: current.venue_map.clone(),
+                    on_change: move |url| form.with_mut(|f| f.venue_map = url),
                 }
             }
             div { class: "form-span-2",
@@ -453,6 +494,10 @@ pub fn AdminEvent(token: String, event_id: i64) -> Element {
     let tok = use_signal(|| token);
     let mut detail = use_resource(move || async move { api::get_event(tok(), event_id).await });
     let base = use_resource(move || async move { api::base_url().await });
+
+    // The chart itself is mounted by the root component and outlives this
+    // screen; all that happens here is saying which event it should show.
+    let mut seating = use_context::<Signal<Option<SeatingTarget>>>();
 
     let mut tab = use_signal(|| Tab::Details);
     let mut toast: Signal<Toast> = use_signal(|| None);
@@ -505,6 +550,23 @@ pub fn AdminEvent(token: String, event_id: i64) -> Element {
                 ),
                 back: Route::AdminEvents { token: tok() },
                 actions: rsx! {
+                    IconButton {
+                        icon: "seating",
+                        label: s.seating_open.to_owned(),
+                        onclick: {
+                            let title = view.event.title.clone();
+                            move |_| {
+                                seating
+                                    .set(
+                                        Some(SeatingTarget {
+                                            token: tok(),
+                                            event_id,
+                                            title: title.clone(),
+                                        }),
+                                    )
+                            }
+                        },
+                    }
                     IconButton {
                         icon: "refresh",
                         label: s.reload.to_owned(),
@@ -740,7 +802,7 @@ fn GuestsTab(
         // before it is read into memory and shipped over the wire.
         if file.size() > api::MAX_VCF_BYTES as u64 {
             toast.set(Some((
-                s.field_cover_too_large
+                s.field_file_too_large
                     .replace("{}", &(api::MAX_VCF_BYTES / (1024 * 1024)).to_string()),
                 true,
             )));
@@ -773,7 +835,7 @@ fn GuestsTab(
                     }
                 }
                 Err(e) => {
-                    toast.set(Some((format!("{} ({e})", s.field_cover_unreadable), true)));
+                    toast.set(Some((format!("{} ({e})", s.field_file_unreadable), true)));
                 }
             }
             importing.set(false);

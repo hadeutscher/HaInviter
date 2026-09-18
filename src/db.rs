@@ -2,15 +2,17 @@
 //!
 //! Postgres rather than an embedded database so the application can run more
 //! than one replica: nothing of consequence lives in the process or on its
-//! local disk. That includes uploaded cover images, which are stored here as
-//! `bytea` precisely so no shared filesystem is needed, and the admin token,
-//! which every replica must agree on.
+//! local disk. That includes uploaded images — cover photographs and venue
+//! plans — which are stored here as `bytea` precisely so no shared filesystem
+//! is needed, and the admin token, which every replica must agree on.
 //!
 //! Timestamps are stored as RFC 3339 text. They are only ever displayed,
 //! exported or compared for ordering — and ISO 8601 sorts lexicographically —
 //! so the extra ceremony of `timestamptz` would buy nothing here.
 
-use crate::types::{EventAdminView, EventInput, EventSummary, GuestDto, InviteView, Rsvp};
+use crate::types::{
+    EventAdminView, EventInput, EventSummary, GuestDto, InviteView, Rsvp, SeatPlacement,
+};
 use deadpool_postgres::{Config, Pool, Runtime};
 use std::sync::OnceLock;
 use tokio_postgres::{GenericClient, NoTls};
@@ -112,6 +114,51 @@ const MIGRATIONS: &[(&str, &str)] = &[
     -- list needs no backfill.
     ALTER TABLE guests ADD COLUMN IF NOT EXISTS phone          TEXT NOT NULL DEFAULT '';
     ALTER TABLE guests ADD COLUMN IF NOT EXISTS invite_sent_at TEXT NOT NULL DEFAULT '';
+    ",
+    ),
+    (
+        "0002-seating-chart",
+        r"
+    -- Uploaded images are no longer only cover photographs: an event also
+    -- carries a plan of its venue for the seating chart to be drawn on.
+    --
+    -- The rename is the one statement here that cannot simply be asked for
+    -- twice, so it is guarded: rename only when the old table is there and the
+    -- new one is not. A database that already has `images` skips it; one that
+    -- missed this migration under the old numbering gets it on the next start.
+    --
+    -- Both tables existing at once is not a contradiction. The base schema
+    -- creates `cover_images IF NOT EXISTS`, so replaying it against a database
+    -- that has already been through here puts an empty `cover_images` back
+    -- beside the real `images`. Renaming onto the live table would be wrong and
+    -- erroring would strand the run, so the guard simply declines; the empty
+    -- table is inert and `load_image` never looks at it.
+    DO $$ BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = current_schema() AND table_name = 'cover_images')
+           AND NOT EXISTS (SELECT 1 FROM information_schema.tables
+                            WHERE table_schema = current_schema() AND table_name = 'images') THEN
+            ALTER TABLE cover_images RENAME TO images;
+        END IF;
+    END $$;
+    ALTER TABLE events ADD COLUMN IF NOT EXISTS venue_map TEXT NOT NULL DEFAULT '';
+
+    -- One row per arriving person, not per guest: a party of three occupies
+    -- three chairs and so has three rows. `seat_index` numbers them within the
+    -- guest, and the pair is the identity of a token on the chart.
+    --
+    -- `event_id` is redundant with the guest's own, and deliberately so: the
+    -- chart is read and rewritten a whole event at a time, and doing that
+    -- through a join on every save would be the only reason the join exists.
+    CREATE TABLE IF NOT EXISTS seats (
+        guest_id   BIGINT           NOT NULL REFERENCES guests (id) ON DELETE CASCADE,
+        seat_index BIGINT           NOT NULL,
+        event_id   BIGINT           NOT NULL REFERENCES events (id) ON DELETE CASCADE,
+        x          DOUBLE PRECISION NOT NULL,
+        y          DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY (guest_id, seat_index)
+    );
+    CREATE INDEX IF NOT EXISTS seats_event_idx ON seats (event_id);
     ",
     ),
 ];
@@ -275,7 +322,8 @@ pub async fn setting_or_insert<C: GenericClient>(
 // ---------------------------------------------------------------------------
 
 const EVENT_FIELDS: &str = "title, hosts, description, cover_image, location, \
-                            location_url, starts_at, rsvp_deadline, allow_plus_ones";
+                            location_url, starts_at, rsvp_deadline, allow_plus_ones, \
+                            venue_map";
 
 fn event_from_row(row: &tokio_postgres::Row, offset: usize) -> EventInput {
     EventInput {
@@ -288,6 +336,7 @@ fn event_from_row(row: &tokio_postgres::Row, offset: usize) -> EventInput {
         starts_at: row.get(offset + 6),
         rsvp_deadline: row.get(offset + 7),
         allow_plus_ones: row.get(offset + 8),
+        venue_map: row.get(offset + 9),
     }
 }
 
@@ -328,8 +377,8 @@ pub async fn create_event<C: GenericClient>(client: &C, input: &EventInput) -> R
     let row = client
         .query_one(
             "INSERT INTO events (title, hosts, description, cover_image, location, location_url,
-                                 starts_at, rsvp_deadline, allow_plus_ones, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+                                 starts_at, rsvp_deadline, allow_plus_ones, venue_map, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
             &[
                 &input.title,
                 &input.hosts,
@@ -340,6 +389,7 @@ pub async fn create_event<C: GenericClient>(client: &C, input: &EventInput) -> R
                 &input.starts_at,
                 &input.rsvp_deadline,
                 &input.allow_plus_ones,
+                &input.venue_map,
                 &now(),
             ],
         )
@@ -357,8 +407,8 @@ pub async fn update_event<C: GenericClient>(
         .execute(
             "UPDATE events SET title = $1, hosts = $2, description = $3, cover_image = $4,
                                location = $5, location_url = $6, starts_at = $7,
-                               rsvp_deadline = $8, allow_plus_ones = $9
-             WHERE id = $10",
+                               rsvp_deadline = $8, allow_plus_ones = $9, venue_map = $10
+             WHERE id = $11",
             &[
                 &input.title,
                 &input.hosts,
@@ -369,6 +419,7 @@ pub async fn update_event<C: GenericClient>(
                 &input.starts_at,
                 &input.rsvp_deadline,
                 &input.allow_plus_ones,
+                &input.venue_map,
                 &id,
             ],
         )
@@ -589,10 +640,10 @@ pub async fn reissue_guest_token<C: GenericClient>(
 }
 
 // ---------------------------------------------------------------------------
-// Cover images
+// Uploaded images
 // ---------------------------------------------------------------------------
 
-pub async fn store_cover<C: GenericClient>(
+pub async fn store_image<C: GenericClient>(
     client: &C,
     id: &str,
     content_type: &str,
@@ -600,7 +651,7 @@ pub async fn store_cover<C: GenericClient>(
 ) -> Result<(), String> {
     client
         .execute(
-            "INSERT INTO cover_images (id, content_type, bytes, created_at)
+            "INSERT INTO images (id, content_type, bytes, created_at)
              VALUES ($1, $2, $3, $4)",
             &[&id, &content_type, &bytes, &now()],
         )
@@ -609,19 +660,86 @@ pub async fn store_cover<C: GenericClient>(
     Ok(())
 }
 
-/// Returns `(content_type, bytes)` for a stored cover image.
-pub async fn load_cover<C: GenericClient>(
+/// Returns `(content_type, bytes)` for a stored image.
+pub async fn load_image<C: GenericClient>(
     client: &C,
     id: &str,
 ) -> Result<Option<(String, Vec<u8>)>, String> {
     let row = client
         .query_opt(
-            "SELECT content_type, bytes FROM cover_images WHERE id = $1",
+            "SELECT content_type, bytes FROM images WHERE id = $1",
             &[&id],
         )
         .await
         .map_err(|e| e.to_string())?;
     Ok(row.map(|r| (r.get(0), r.get(1))))
+}
+
+// ---------------------------------------------------------------------------
+// Seating
+// ---------------------------------------------------------------------------
+
+/// Every placed person on one event's seating chart.
+pub async fn list_seats<C: GenericClient>(
+    client: &C,
+    event_id: i64,
+) -> Result<Vec<SeatPlacement>, String> {
+    let rows = client
+        .query(
+            "SELECT guest_id, seat_index, x, y FROM seats WHERE event_id = $1
+             ORDER BY guest_id ASC, seat_index ASC",
+            &[&event_id],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| SeatPlacement {
+            guest_id: row.get(0),
+            seat_index: row.get(1),
+            x: row.get(2),
+            y: row.get(3),
+        })
+        .collect())
+}
+
+/// Replaces an event's whole chart in one transaction.
+///
+/// The chart is saved as a whole rather than one token at a time because that is
+/// how it is edited: one drag can move a dozen people at once, and a
+/// half-applied rearrangement is not a state anyone asked for. Two admins
+/// arranging the same event therefore overwrite each other wholesale — last drag
+/// wins — which is the same rule the room itself follows.
+///
+/// A placement whose guest no longer belongs to this event is dropped rather
+/// than rejected: the browser may well be working from a guest list that changed
+/// underneath it, and losing one stale token is better than losing the drag.
+pub async fn replace_seats(
+    client: &mut deadpool_postgres::Object,
+    event_id: i64,
+    seats: &[SeatPlacement],
+) -> Result<(), String> {
+    let tx = client.transaction().await.map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM seats WHERE event_id = $1", &[&event_id])
+        .await
+        .map_err(|e| e.to_string())?;
+    for seat in seats {
+        tx.execute(
+            "INSERT INTO seats (guest_id, seat_index, event_id, x, y)
+             SELECT $1, $2, $3, $4, $5
+             WHERE EXISTS (SELECT 1 FROM guests WHERE id = $1 AND event_id = $3)",
+            &[
+                &seat.guest_id,
+                &seat.seat_index,
+                &event_id,
+                &seat.x,
+                &seat.y,
+            ],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -758,6 +876,20 @@ mod tests {
         Some(client)
     }
 
+    async fn has_table(client: &tokio_postgres::Client, table: &str) -> bool {
+        client
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM information_schema.tables
+                      WHERE table_schema = current_schema() AND table_name = $1
+                 )",
+                &[&table],
+            )
+            .await
+            .expect("table lookup")
+            .get(0)
+    }
+
     async fn has_column(client: &tokio_postgres::Client, table: &str, column: &str) -> bool {
         client
             .query_one(
@@ -821,6 +953,47 @@ mod tests {
     }
 
     /// Migrating twice must not fail, and must not apply anything twice.
+    /// The seating migration renames a table, which is the one statement in it
+    /// that cannot simply be asked for twice.
+    ///
+    /// A database repaired by the rules above is offered every migration again,
+    /// so an unguarded `ALTER TABLE cover_images RENAME TO images` would abort
+    /// the whole run the second time round — and the run is one transaction, so
+    /// it would take every other migration down with it.
+    #[tokio::test]
+    async fn the_seating_migration_survives_being_offered_twice() {
+        let Some(mut client) = scratch("migration_seating").await else {
+            if std::env::var("HAINVITER_REQUIRE_DB").is_ok() {
+                panic!("HAINVITER_TEST_DATABASE_URL must be set when HAINVITER_REQUIRE_DB is");
+            }
+            eprintln!("\n  SKIPPED: set HAINVITER_TEST_DATABASE_URL to run the migration tests.\n");
+            return;
+        };
+
+        migrate(&mut client).await.expect("a clean migration");
+        assert!(has_table(&client, "images").await);
+        assert!(!has_table(&client, "cover_images").await);
+
+        // Forget what has been applied, as a database recovering from the old
+        // numbering effectively has: every migration is offered again.
+        client
+            .batch_execute("DELETE FROM schema_migrations")
+            .await
+            .expect("rewind");
+
+        migrate(&mut client)
+            .await
+            .expect("offering the seating migration again must not fail on the rename");
+        assert!(has_table(&client, "images").await);
+        assert!(has_column(&client, "events", "venue_map").await);
+        assert!(has_table(&client, "seats").await);
+
+        client
+            .batch_execute("DROP SCHEMA migration_seating CASCADE")
+            .await
+            .expect("cleanup");
+    }
+
     #[tokio::test]
     async fn migrating_an_up_to_date_database_does_nothing() {
         let Some(mut client) = scratch("migration_idempotent").await else {

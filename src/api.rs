@@ -10,12 +10,16 @@
 
 use crate::{
     i18n::Locale,
-    types::{EventAdminView, EventInput, EventSummary, ImportSummary, InviteView, RsvpSubmission},
+    types::{
+        EventAdminView, EventInput, EventSummary, ImportSummary, InviteView, RsvpSubmission,
+        SeatPlacement,
+    },
 };
 use dioxus::prelude::*;
 
-/// Largest cover image we accept, in bytes.
-pub const MAX_COVER_BYTES: usize = 8 * 1024 * 1024;
+/// Largest image we accept, in bytes. Covers a photograph and a scanned floor
+/// plan alike.
+pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Largest `.vcf` we accept, in bytes. A whole phone address book exported at
 /// once is a few hundred kilobytes; this leaves generous room above that while
@@ -230,7 +234,7 @@ pub async fn import_contacts(
     }
     if bytes.len() > MAX_VCF_BYTES {
         return Err(ServerFnError::new(
-            s().field_cover_too_large
+            s().field_file_too_large
                 .replace("{}", &(MAX_VCF_BYTES / (1024 * 1024)).to_string()),
         ));
     }
@@ -392,17 +396,17 @@ pub async fn reissue_invite(token: String, guest_id: i64) -> Result<String, Serv
 }
 
 // ---------------------------------------------------------------------------
-// Cover images
+// Images
 // ---------------------------------------------------------------------------
 
-/// Stores an uploaded cover image and returns the path to serve it from
-/// (`/uploads/…`).
+/// Stores an uploaded image — a cover photograph or a venue plan — and returns
+/// the path to serve it from (`/uploads/…`).
 ///
 /// The bytes go into the database rather than onto local disk, so every replica
 /// can serve the image and no shared filesystem is needed. The file type comes
 /// from the bytes themselves, never from the supplied file name.
-#[server(endpoint = "upload_cover")]
-pub async fn upload_cover(
+#[server(endpoint = "upload_image")]
+pub async fn upload_image(
     token: String,
     filename: String,
     bytes: Vec<u8>,
@@ -411,10 +415,10 @@ pub async fn upload_cover(
     if bytes.is_empty() {
         return Err(ServerFnError::new(s().err_file_empty));
     }
-    if bytes.len() > MAX_COVER_BYTES {
+    if bytes.len() > MAX_IMAGE_BYTES {
         return Err(ServerFnError::new(
-            s().field_cover_too_large
-                .replace("{}", &(MAX_COVER_BYTES / (1024 * 1024)).to_string()),
+            s().field_image_too_large
+                .replace("{}", &(MAX_IMAGE_BYTES / (1024 * 1024)).to_string()),
         ));
     }
     let (ext, content_type) =
@@ -424,12 +428,12 @@ pub async fn upload_cover(
     // image nor be guessed from the outside.
     let name = format!("{}.{ext}", crate::auth::new_token());
     let client = conn().await?;
-    crate::db::store_cover(&**client, &name, content_type, &bytes)
+    crate::db::store_image(&**client, &name, content_type, &bytes)
         .await
         .map_err(|e| ServerFnError::new(format!("{}: {e}", s().err_store_failed)))?;
 
     crate::audit::record(
-        "cover_uploaded",
+        "image_uploaded",
         serde_json::json!({
             "stored_as": name,
             "original_name": filename,
@@ -457,6 +461,63 @@ fn sniff_image(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
         return Some(("webp", "image/webp"));
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Seating
+// ---------------------------------------------------------------------------
+
+/// One event's seating chart, as last arranged.
+#[server(endpoint = "seating_plan")]
+pub async fn seating_plan(
+    token: String,
+    event_id: i64,
+) -> Result<Vec<SeatPlacement>, ServerFnError> {
+    guard(&token)?;
+    let client = conn().await?;
+    crate::db::list_seats(&**client, event_id)
+        .await
+        .map_err(db_error)
+}
+
+/// Replaces one event's seating chart with the arrangement now on screen.
+#[server(endpoint = "save_seating")]
+pub async fn save_seating(
+    token: String,
+    event_id: i64,
+    seats: Vec<SeatPlacement>,
+) -> Result<(), ServerFnError> {
+    guard(&token)?;
+    let seats: Vec<SeatPlacement> = seats.into_iter().filter_map(sane_seat).collect();
+    let mut client = conn().await?;
+    crate::db::replace_seats(&mut client, event_id, &seats)
+        .await
+        .map_err(db_error)?;
+    crate::audit::record(
+        "seating_saved",
+        serde_json::json!({ "event_id": event_id, "seats": seats.len() }),
+    );
+    Ok(())
+}
+
+/// Drops a placement the chart could not have produced, and pulls the rest into
+/// a range a later reader can draw.
+///
+/// Coordinates are fractions of the venue map, but a person parked in the tray
+/// beside it legitimately sits outside `0..1`, so the bound is generous rather
+/// than exact — it exists to stop a corrupt or hostile client from writing a
+/// token a thousand screens away, not to police where anyone stands.
+#[cfg(feature = "server")]
+fn sane_seat(seat: SeatPlacement) -> Option<SeatPlacement> {
+    const REACH: f64 = 4.0;
+    if !seat.x.is_finite() || !seat.y.is_finite() || seat.seat_index < 0 {
+        return None;
+    }
+    Some(SeatPlacement {
+        x: seat.x.clamp(-REACH, REACH),
+        y: seat.y.clamp(-REACH, REACH),
+        ..seat
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +647,7 @@ fn sanitise(mut input: EventInput) -> EventInput {
     input.title = one_line(&input.title);
     input.hosts = one_line(&input.hosts);
     input.cover_image = one_line(&input.cover_image);
+    input.venue_map = one_line(&input.venue_map);
     input.location = one_line(&input.location);
     input.location_url = one_line(&input.location_url);
     input.starts_at = one_line(&input.starts_at);

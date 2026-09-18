@@ -70,6 +70,10 @@ pub struct EventInput {
     pub rsvp_deadline: String,
     /// Whether guests may bring additional people (up to their own cap).
     pub allow_plus_ones: bool,
+    /// Plan of the venue the seating chart is drawn on: an absolute URL, or a
+    /// `/uploads/…` path produced by [`crate::api::upload_image`]. Empty for an
+    /// event whose chart is a blank sheet.
+    pub venue_map: String,
 }
 
 /// One row of the admin panel's event list, with response tallies.
@@ -136,6 +140,31 @@ pub struct EventAdminView {
     pub id: i64,
     pub event: EventInput,
     pub guests: Vec<GuestDto>,
+}
+
+// ---------------------------------------------------------------------------
+// Seating
+// ---------------------------------------------------------------------------
+
+/// Where one arriving person stands on the seating chart.
+///
+/// There is one of these per *person*, not per guest: a guest who confirmed a
+/// party of three is three placements, numbered `0..3` by `seat_index`. The
+/// chart is a picture of who is in the room, and a family of three occupies
+/// three chairs.
+///
+/// Coordinates are fractions of the venue map's own rectangle rather than
+/// pixels, so a chart arranged on a desktop still reads correctly on a phone,
+/// at a different zoom level, or after the map image is replaced with a
+/// higher-resolution scan. Values outside `0..1` are legitimate: they are
+/// people who have not been placed on the map yet and are still waiting in the
+/// tray beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SeatPlacement {
+    pub guest_id: i64,
+    pub seat_index: i64,
+    pub x: f64,
+    pub y: f64,
 }
 
 /// Everything the invitation page needs, resolved from a guest token.
