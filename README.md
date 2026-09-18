@@ -10,8 +10,6 @@ good-looking invitation page for every guest.
   event details and a single question to answer.
 - **One-tap sending** — import contacts from a `.vcf`, then hand each guest's
   invitation to WhatsApp or the system share sheet straight from their row.
-- **Seating chart** — drag everyone who accepted onto a plan of the venue, one
-  token per person arriving.
 - **No accounts** — access is by unguessable link, for hosts and guests alike.
 - **English and Hebrew**, including right-to-left layout, chosen per deployment.
 - **Stateless** — everything lives in PostgreSQL, so you can run as many
@@ -38,44 +36,11 @@ apart.
 | `src/ui/material.rs` | the Material 3 component set |
 | `src/ui/invite.rs` | the guest-facing invitation page |
 | `src/ui/admin.rs` | the admin panel |
-| `src/ui/seating.rs` | the seating-chart window |
-| `src/seating/mod.rs` | seating arithmetic: arrivals, the stage, the tray |
-| `src/seating/board.rs` | the haboard scene the chart is drawn on (browser only) |
 | `assets/material.css` | Material 3 tokens and components |
 
 Material 3 is implemented directly in CSS and inline SVG rather than pulled in as
 a JavaScript component library: the invitation pages are opened on phones over
 mobile data, and there is no web font, icon font or CDN request in the bundle.
-
-## Seating chart
-
-The chart opens from the table icon on an event's screen. Everyone who replied
-"attending" is on it as a draggable token, one **per person arriving**: a guest
-who confirmed a party of three is three tokens, because three chairs is what the
-room has to find. Tokens from the same invitation share a colour. Nobody can be
-added, copied or invented on the chart — the guest list decides who is in the
-room, and the chart only decides where they stand.
-
-People start in a tray down the left-hand edge and are dragged onto the venue
-plan, which is an image uploaded under the event's **Details** tab. Holding Ctrl
-while dragging snaps a token's edges to its neighbours', Ctrl-click picks out
-several to move together, Ctrl+Z and Ctrl+Y undo and redo, and Delete sends
-someone back to the tray. Every finished drag saves.
-
-Positions are stored as fractions of the venue plan rather than as pixels, so a
-chart arranged on a desktop still reads correctly on a phone, at another zoom
-level, or after the plan is replaced with a better scan.
-
-The drawing is done by [haboard](https://crates.io/crates/haboard), a
-GPU-accelerated 2D sprite engine, on a WebGPU canvas with a WebGL fallback. Two
-consequences are worth knowing about:
-
-- A browser page gets exactly one event loop, bound for good to the canvas it was
-  created with. The chart window is therefore mounted by the root component and
-  merely hidden when closed, rather than mounted and unmounted with a route.
-- Text is the one thing a sprite engine will not draw, so the tokens are painted
-  on a 2D canvas by the browser — which also gets bidirectional Hebrew names,
-  font fallback and emoji right — and handed to the GPU as pixels.
 
 ## Running it
 
@@ -167,9 +132,8 @@ Everything is an environment variable; there is no configuration file.
 Nothing is kept in the process or on its local disk, so replicas need no
 coordination and no shared filesystem:
 
-- **Uploaded images are stored in the database** as `bytea`, not on disk, and
-  served from there — cover photographs and venue plans alike. That is the whole
-  reason there is no RWX volume to provision.
+- **Cover images are stored in the database** as `bytea`, not on disk, and served
+  from there. That is the whole reason there is no RWX volume to provision.
 - **The admin token is stored in the database.** With it unset, the first
   instance to start generates one and writes it with `ON CONFLICT DO NOTHING`;
   every instance then reads back the same value. Without that, each replica would

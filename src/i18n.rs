@@ -320,15 +320,14 @@ pub struct Strings {
     pub field_body: &'static str,
     pub field_body_help: &'static str,
     pub field_cover: &'static str,
-    pub field_venue: &'static str,
-    pub field_venue_help: &'static str,
-    pub field_image_upload: &'static str,
-    pub field_image_uploading: &'static str,
-    pub field_image_remove: &'static str,
-    pub field_image_url: &'static str,
-    pub field_image_unreadable: &'static str,
+    pub field_cover_upload: &'static str,
+    pub field_cover_uploading: &'static str,
+    pub field_cover_remove: &'static str,
+    pub field_cover_url: &'static str,
+    pub field_cover_preview_alt: &'static str,
+    pub field_cover_unreadable: &'static str,
     /// `{}` is the size limit in MB
-    pub field_image_too_large: &'static str,
+    pub field_cover_too_large: &'static str,
     pub field_plus_ones: &'static str,
     pub admin_save_changes: &'static str,
     pub admin_saved: &'static str,
@@ -396,19 +395,6 @@ pub struct Strings {
     pub share_copied: &'static str,
     /// The message a host sends a guest. `{name}` and `{link}` are filled in.
     pub invite_message: &'static str,
-
-    // ── Admin: seating chart ──
-    pub seating_open: &'static str,
-    pub seating_title: &'static str,
-    pub seating_close: &'static str,
-    pub seating_loading: &'static str,
-    pub seating_hint: &'static str,
-    pub seating_saved: &'static str,
-    pub seating_no_map: &'static str,
-    /// `{n}` people to seat
-    pub seating_n_people: &'static str,
-    pub seating_nobody_title: &'static str,
-    pub seating_nobody_body: &'static str,
 
     // ── Admin: responses ──
     pub stat_invited: &'static str,
@@ -556,14 +542,13 @@ pub static EN: Strings = Strings {
     field_body: "Invitation text",
     field_body_help: "Leave a blank line between paragraphs.",
     field_cover: "Cover image",
-    field_venue: "Venue plan",
-    field_venue_help: "The floor plan the seating chart is drawn on.",
-    field_image_upload: "Upload image",
-    field_image_uploading: "Uploading…",
-    field_image_remove: "Remove",
-    field_image_url: "…or paste an image URL",
-    field_image_unreadable: "Could not read that file.",
-    field_image_too_large: "That image is larger than {} MB.",
+    field_cover_upload: "Upload image",
+    field_cover_uploading: "Uploading…",
+    field_cover_remove: "Remove",
+    field_cover_url: "…or paste an image URL",
+    field_cover_preview_alt: "Cover preview",
+    field_cover_unreadable: "Could not read that file.",
+    field_cover_too_large: "That image is larger than {} MB.",
     field_plus_ones: "Guests may bring the people on their invitation",
     admin_save_changes: "Save changes",
     admin_saved: "Event saved.",
@@ -628,20 +613,6 @@ pub static EN: Strings = Strings {
     guests_import_no_phone: "{n} had no usable mobile number — you can add those by hand.",
     share_copied: "Message copied to the clipboard.",
     invite_message: "Hi {name}! You are invited — here is your personal invitation: {link}",
-
-    seating_open: "Seating chart",
-    seating_title: "Seating chart",
-    seating_close: "Close the seating chart",
-    seating_loading: "Loading the chart…",
-    seating_hint: "Drag each person onto the plan. Hold Ctrl while dragging to line them up with \
-                   their neighbours, Ctrl-click to pick out several, and press Delete to send \
-                   someone back to the queue on the left.",
-    seating_saved: "Chart saved",
-    seating_no_map: "no venue plan yet — add one under Details",
-    seating_n_people: "{n} to seat",
-    seating_nobody_title: "Nobody has accepted yet",
-    seating_nobody_body: "The chart fills itself in from the replies: everyone who says yes \
-                          appears here, one token per person coming.",
 
     stat_invited: "Invited",
     stat_coming: "Coming",
@@ -790,14 +761,13 @@ pub static HE: Strings = Strings {
     field_body: "נוסח ההזמנה",
     field_body_help: "השאירו שורה ריקה בין פסקאות.",
     field_cover: "תמונת רקע",
-    field_venue: "תרשים המקום",
-    field_venue_help: "התוכנית שעליה מסודרת מפת ההושבה.",
-    field_image_upload: "העלאת תמונה",
-    field_image_uploading: "מעלה…",
-    field_image_remove: "הסרה",
-    field_image_url: "…או הדביקו כתובת של תמונה",
-    field_image_unreadable: "לא הצלחנו לקרוא את הקובץ.",
-    field_image_too_large: "התמונה גדולה מ־{} מ״ב.",
+    field_cover_upload: "העלאת תמונה",
+    field_cover_uploading: "מעלה…",
+    field_cover_remove: "הסרה",
+    field_cover_url: "…או הדביקו כתובת של תמונה",
+    field_cover_preview_alt: "תצוגה מקדימה של תמונת הרקע",
+    field_cover_unreadable: "לא הצלחנו לקרוא את הקובץ.",
+    field_cover_too_large: "התמונה גדולה מ־{} מ״ב.",
     field_plus_ones: "מוזמנים יכולים להביא את מי שרשום בהזמנה שלהם",
     admin_save_changes: "שמירת השינויים",
     admin_saved: "האירוע נשמר.",
@@ -861,18 +831,6 @@ pub static HE: Strings = Strings {
     guests_import_no_phone: "ל־{n} מהם לא נמצא מספר נייד תקין — אפשר להוסיף אותם ידנית.",
     share_copied: "ההודעה הועתקה.",
     invite_message: "היי {name}! הוזמנת — זו ההזמנה האישית שלך: {link}",
-
-    seating_open: "מפת הושבה",
-    seating_title: "מפת הושבה",
-    seating_close: "סגירת מפת ההושבה",
-    seating_loading: "טוען את המפה…",
-    seating_hint: "גררו כל אדם אל התרשים. החזקת Ctrl בזמן הגרירה מיישרת אותו מול השכנים, \
-                   Ctrl ולחיצה בוחרת כמה יחד, ו־Delete מחזיר מישהו לתור שבצד.",
-    seating_saved: "המפה נשמרה",
-    seating_no_map: "עוד אין תרשים של המקום — הוסיפו אותו בלשונית הפרטים",
-    seating_n_people: "{n} להושבה",
-    seating_nobody_title: "עוד אף אחד לא אישר",
-    seating_nobody_body: "המפה מתמלאת מהתשובות: כל מי שמאשר מופיע כאן, אסימון לכל אדם שמגיע.",
 
     stat_invited: "מוזמנים",
     stat_coming: "מגיעים",
@@ -960,8 +918,6 @@ mod tests {
         assert_ne!(EN.invite_question, HE.invite_question);
         assert_ne!(EN.admin_events, HE.admin_events);
         assert_ne!(EN.err_invite_not_found, HE.err_invite_not_found);
-        assert_ne!(EN.seating_title, HE.seating_title);
-        assert_ne!(EN.field_venue, HE.field_venue);
         for (en, he) in EN.months.iter().zip(HE.months.iter()) {
             assert_ne!(en, he, "month name not translated");
         }
