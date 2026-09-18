@@ -19,9 +19,16 @@ use tokio_postgres::{GenericClient, NoTls};
 
 static POOL: OnceLock<Pool> = OnceLock::new();
 
-/// A table the base schema creates, used to recognise a database that already
-/// has that schema. No migration may rename or drop this one.
-const BASE_SCHEMA_SENTINEL: &str = "events";
+/// Tables the base schema creates. Their presence is what tells the runner that
+/// a database already has that schema, so it is never applied a second time.
+///
+/// Several rather than one on purpose. A single name would be load-bearing in
+/// the way the old version counter was: rename it in some later migration and
+/// the probe quietly reports that the base was never applied, which replays it.
+/// Asking whether *any* of these is present survives any one of them being
+/// renamed away, and they cannot all vanish while the database is still a
+/// HaInviter database.
+const BASE_SCHEMA_TABLES: &[&str] = &["events", "guests", "settings"];
 
 /// Identifies the migration advisory lock. Several replicas start at once, and
 /// exactly one of them may apply a migration.
@@ -49,7 +56,10 @@ const MIGRATION_LOCK: i64 = 0x4841_494E_5654_5201;
 /// check both ends, that the old object is still present *and* that the new one
 /// is not, because either may already be true.
 ///
-/// The base schema is exempt: it is never offered twice. See [`migrate`].
+/// The base schema is exempt: it is never offered twice, because [`migrate`]
+/// recognises it from the tables it creates. Renaming one of those in a later
+/// migration is allowed — [`BASE_SCHEMA_TABLES`] names more than one for that
+/// reason — but emptying the list is not.
 const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0001-initial-schema",
@@ -259,9 +269,9 @@ async fn migrate(client: &mut tokio_postgres::Client) -> Result<(), tokio_postgr
             .query_one(
                 "SELECT EXISTS (
                      SELECT 1 FROM information_schema.tables
-                      WHERE table_schema = current_schema() AND table_name = $1
+                      WHERE table_schema = current_schema() AND table_name = ANY($1)
                  )",
-                &[&BASE_SCHEMA_SENTINEL],
+                &[&BASE_SCHEMA_TABLES],
             )
             .await?
             .get(0);
@@ -1005,6 +1015,52 @@ mod tests {
 
         client
             .batch_execute("DROP SCHEMA migration_lost_ledger CASCADE")
+            .await
+            .expect("cleanup");
+    }
+
+    /// Renaming one of the base schema's tables must not look like a database
+    /// that never had the base schema.
+    ///
+    /// Raised by the seating chart session against the first version of this,
+    /// which probed for one table only: rename that one and the runner would
+    /// quietly conclude the base had never been applied, and replay it. Several
+    /// are probed so that no single name carries the decision.
+    ///
+    /// `settings` is the one renamed here because no later migration mentions
+    /// it. Renaming `events` would fail for an unrelated reason — the seating
+    /// migration adds a column to it — which says something worth knowing on
+    /// its own: a table later migrations name cannot be renamed freely, whoever
+    /// is probing for it.
+    #[tokio::test]
+    async fn renaming_one_base_table_does_not_look_like_an_empty_database() {
+        let Some(mut client) = scratch("migration_renamed_base").await else {
+            return;
+        };
+        migrate(&mut client).await.expect("a clean migration");
+
+        client
+            .batch_execute(
+                "ALTER TABLE settings RENAME TO app_settings;
+                 DELETE FROM schema_migrations;",
+            )
+            .await
+            .expect("rename and lose the ledger");
+
+        migrate(&mut client)
+            .await
+            .expect("a migration with no ledger");
+        assert!(
+            !has_table(&client, "settings").await,
+            "the base schema must not be replayed just because one of its tables was renamed"
+        );
+        assert!(
+            has_table(&client, "app_settings").await,
+            "the rename stands"
+        );
+
+        client
+            .batch_execute("DROP SCHEMA migration_renamed_base CASCADE")
             .await
             .expect("cleanup");
     }
