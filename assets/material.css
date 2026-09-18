@@ -399,7 +399,9 @@ h1, h2, h3, h4 {
 
 .md-field--select .md-field__input {
   appearance: none;
-  padding-right: 2.5rem;
+  /* Logical, so the room this reserves lands on the same side as the chevron
+     (placed with inset-inline-end) when the interface is in Hebrew. */
+  padding-inline-end: 2.5rem;
   cursor: pointer;
 }
 
