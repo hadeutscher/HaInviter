@@ -420,8 +420,14 @@
   display: flex;
   gap: 0.25rem;
   border-bottom: 1px solid var(--md-outline-variant);
+  /* Tabs scroll sideways when they do not fit; the active indicator must not
+     make the strip scrollable on the cross axis. */
   overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
 }
+
+.admin-tabs::-webkit-scrollbar { display: none; }
 
 .admin-tab {
   position: relative;
@@ -443,7 +449,7 @@
   content: "";
   position: absolute;
   inset-inline: 0.75rem;
-  bottom: -1px;
+  bottom: 0;
   height: 3px;
   border-radius: 3px 3px 0 0;
   background: var(--md-primary);
