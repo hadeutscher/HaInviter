@@ -2,15 +2,17 @@
 //!
 //! Postgres rather than an embedded database so the application can run more
 //! than one replica: nothing of consequence lives in the process or on its
-//! local disk. That includes uploaded cover images, which are stored here as
-//! `bytea` precisely so no shared filesystem is needed, and the admin token,
-//! which every replica must agree on.
+//! local disk. That includes uploaded images — cover photographs and venue
+//! plans — which are stored here as `bytea` precisely so no shared filesystem
+//! is needed, and the admin token, which every replica must agree on.
 //!
 //! Timestamps are stored as RFC 3339 text. They are only ever displayed,
 //! exported or compared for ordering — and ISO 8601 sorts lexicographically —
 //! so the extra ceremony of `timestamptz` would buy nothing here.
 
-use crate::types::{EventAdminView, EventInput, EventSummary, GuestDto, InviteView, Rsvp};
+use crate::types::{
+    EventAdminView, EventInput, EventSummary, GuestDto, InviteView, Rsvp, SeatPlacement,
+};
 use deadpool_postgres::{Config, Pool, Runtime};
 use std::sync::OnceLock;
 use tokio_postgres::{GenericClient, NoTls};
@@ -96,6 +98,28 @@ const MIGRATIONS: &[&str] = &[
     -- list needs no backfill.
     ALTER TABLE guests ADD COLUMN phone          TEXT NOT NULL DEFAULT '';
     ALTER TABLE guests ADD COLUMN invite_sent_at TEXT NOT NULL DEFAULT '';
+
+    -- Uploaded images are no longer only cover photographs: an event also
+    -- carries a plan of its venue for the seating chart to be drawn on.
+    ALTER TABLE cover_images RENAME TO images;
+    ALTER TABLE events ADD COLUMN venue_map TEXT NOT NULL DEFAULT '';
+
+    -- One row per arriving person, not per guest: a party of three occupies
+    -- three chairs and so has three rows. `seat_index` numbers them within the
+    -- guest, and the pair is the identity of a token on the chart.
+    --
+    -- `event_id` is redundant with the guest's own, and deliberately so: the
+    -- chart is read and rewritten a whole event at a time, and doing that
+    -- through a join on every save would be the only reason the join exists.
+    CREATE TABLE seats (
+        guest_id   BIGINT           NOT NULL REFERENCES guests (id) ON DELETE CASCADE,
+        seat_index BIGINT           NOT NULL,
+        event_id   BIGINT           NOT NULL REFERENCES events (id) ON DELETE CASCADE,
+        x          DOUBLE PRECISION NOT NULL,
+        y          DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY (guest_id, seat_index)
+    );
+    CREATE INDEX seats_event_idx ON seats (event_id);
     ",
 ];
 
@@ -214,7 +238,8 @@ pub async fn setting_or_insert<C: GenericClient>(
 // ---------------------------------------------------------------------------
 
 const EVENT_FIELDS: &str = "title, hosts, description, cover_image, location, \
-                            location_url, starts_at, rsvp_deadline, allow_plus_ones";
+                            location_url, starts_at, rsvp_deadline, allow_plus_ones, \
+                            venue_map";
 
 fn event_from_row(row: &tokio_postgres::Row, offset: usize) -> EventInput {
     EventInput {
@@ -227,6 +252,7 @@ fn event_from_row(row: &tokio_postgres::Row, offset: usize) -> EventInput {
         starts_at: row.get(offset + 6),
         rsvp_deadline: row.get(offset + 7),
         allow_plus_ones: row.get(offset + 8),
+        venue_map: row.get(offset + 9),
     }
 }
 
@@ -267,8 +293,8 @@ pub async fn create_event<C: GenericClient>(client: &C, input: &EventInput) -> R
     let row = client
         .query_one(
             "INSERT INTO events (title, hosts, description, cover_image, location, location_url,
-                                 starts_at, rsvp_deadline, allow_plus_ones, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+                                 starts_at, rsvp_deadline, allow_plus_ones, venue_map, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
             &[
                 &input.title,
                 &input.hosts,
@@ -279,6 +305,7 @@ pub async fn create_event<C: GenericClient>(client: &C, input: &EventInput) -> R
                 &input.starts_at,
                 &input.rsvp_deadline,
                 &input.allow_plus_ones,
+                &input.venue_map,
                 &now(),
             ],
         )
@@ -296,8 +323,8 @@ pub async fn update_event<C: GenericClient>(
         .execute(
             "UPDATE events SET title = $1, hosts = $2, description = $3, cover_image = $4,
                                location = $5, location_url = $6, starts_at = $7,
-                               rsvp_deadline = $8, allow_plus_ones = $9
-             WHERE id = $10",
+                               rsvp_deadline = $8, allow_plus_ones = $9, venue_map = $10
+             WHERE id = $11",
             &[
                 &input.title,
                 &input.hosts,
@@ -308,6 +335,7 @@ pub async fn update_event<C: GenericClient>(
                 &input.starts_at,
                 &input.rsvp_deadline,
                 &input.allow_plus_ones,
+                &input.venue_map,
                 &id,
             ],
         )
@@ -528,10 +556,10 @@ pub async fn reissue_guest_token<C: GenericClient>(
 }
 
 // ---------------------------------------------------------------------------
-// Cover images
+// Uploaded images
 // ---------------------------------------------------------------------------
 
-pub async fn store_cover<C: GenericClient>(
+pub async fn store_image<C: GenericClient>(
     client: &C,
     id: &str,
     content_type: &str,
@@ -539,7 +567,7 @@ pub async fn store_cover<C: GenericClient>(
 ) -> Result<(), String> {
     client
         .execute(
-            "INSERT INTO cover_images (id, content_type, bytes, created_at)
+            "INSERT INTO images (id, content_type, bytes, created_at)
              VALUES ($1, $2, $3, $4)",
             &[&id, &content_type, &bytes, &now()],
         )
@@ -548,19 +576,86 @@ pub async fn store_cover<C: GenericClient>(
     Ok(())
 }
 
-/// Returns `(content_type, bytes)` for a stored cover image.
-pub async fn load_cover<C: GenericClient>(
+/// Returns `(content_type, bytes)` for a stored image.
+pub async fn load_image<C: GenericClient>(
     client: &C,
     id: &str,
 ) -> Result<Option<(String, Vec<u8>)>, String> {
     let row = client
         .query_opt(
-            "SELECT content_type, bytes FROM cover_images WHERE id = $1",
+            "SELECT content_type, bytes FROM images WHERE id = $1",
             &[&id],
         )
         .await
         .map_err(|e| e.to_string())?;
     Ok(row.map(|r| (r.get(0), r.get(1))))
+}
+
+// ---------------------------------------------------------------------------
+// Seating
+// ---------------------------------------------------------------------------
+
+/// Every placed person on one event's seating chart.
+pub async fn list_seats<C: GenericClient>(
+    client: &C,
+    event_id: i64,
+) -> Result<Vec<SeatPlacement>, String> {
+    let rows = client
+        .query(
+            "SELECT guest_id, seat_index, x, y FROM seats WHERE event_id = $1
+             ORDER BY guest_id ASC, seat_index ASC",
+            &[&event_id],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| SeatPlacement {
+            guest_id: row.get(0),
+            seat_index: row.get(1),
+            x: row.get(2),
+            y: row.get(3),
+        })
+        .collect())
+}
+
+/// Replaces an event's whole chart in one transaction.
+///
+/// The chart is saved as a whole rather than one token at a time because that is
+/// how it is edited: one drag can move a dozen people at once, and a
+/// half-applied rearrangement is not a state anyone asked for. Two admins
+/// arranging the same event therefore overwrite each other wholesale — last drag
+/// wins — which is the same rule the room itself follows.
+///
+/// A placement whose guest no longer belongs to this event is dropped rather
+/// than rejected: the browser may well be working from a guest list that changed
+/// underneath it, and losing one stale token is better than losing the drag.
+pub async fn replace_seats(
+    client: &mut deadpool_postgres::Object,
+    event_id: i64,
+    seats: &[SeatPlacement],
+) -> Result<(), String> {
+    let tx = client.transaction().await.map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM seats WHERE event_id = $1", &[&event_id])
+        .await
+        .map_err(|e| e.to_string())?;
+    for seat in seats {
+        tx.execute(
+            "INSERT INTO seats (guest_id, seat_index, event_id, x, y)
+             SELECT $1, $2, $3, $4, $5
+             WHERE EXISTS (SELECT 1 FROM guests WHERE id = $1 AND event_id = $3)",
+            &[
+                &seat.guest_id,
+                &seat.seat_index,
+                &event_id,
+                &seat.x,
+                &seat.y,
+            ],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

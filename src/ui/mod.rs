@@ -3,13 +3,27 @@
 pub mod admin;
 pub mod invite;
 pub mod material;
+pub mod seating;
 
 pub use admin::{AdminEvent, AdminEvents};
 pub use invite::Invite;
+pub use seating::{SeatingTarget, SeatingWindow};
 
 use crate::i18n::t;
 use dioxus::prelude::*;
 use material::Icon;
+
+/// Extracts the human-readable part of a server-function error.
+///
+/// Server functions arrive wrapped in the transport's own wording; what the
+/// server actually said is the tail, and that is the only part worth showing
+/// anyone.
+pub fn message_of(error: &ServerFnError) -> String {
+    let text = error.to_string();
+    text.rsplit_once(": ")
+        .map(|(_, tail)| tail.to_owned())
+        .unwrap_or(text)
+}
 
 /// The public front door. There is deliberately nothing to do here: guests
 /// arrive through their personal link and admins through theirs.

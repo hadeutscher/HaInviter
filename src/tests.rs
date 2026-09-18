@@ -12,7 +12,7 @@
 use crate::{
     api, audit, db, export,
     i18n::Locale,
-    types::{EventInput, Rsvp, RsvpSubmission},
+    types::{EventInput, Rsvp, RsvpSubmission, SeatPlacement},
 };
 
 const ADMIN: &str = "test-admin-token";
@@ -173,19 +173,19 @@ async fn an_event_can_be_created_invited_to_and_answered() {
     assert_eq!(declined.status, Rsvp::Declined);
     assert_eq!(declined.party_size, 0);
 
-    // ── Cover images live in the database ──────────────────────────────────
+    // ── Uploaded images live in the database ───────────────────────────────
     let png: Vec<u8> = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
         .into_iter()
         .chain(*b"not really a png body")
         .collect();
-    let path = api::upload_cover(admin.clone(), "cover.png".to_owned(), png.clone())
+    let path = api::upload_image(admin.clone(), "cover.png".to_owned(), png.clone())
         .await
         .expect("a PNG should be accepted");
     assert!(path.starts_with("/uploads/") && path.ends_with(".png"));
     let stored_id = path.trim_start_matches("/uploads/").to_owned();
     {
         let client = db::client().await.expect("a connection");
-        let (content_type, bytes) = db::load_cover(&**client, &stored_id)
+        let (content_type, bytes) = db::load_image(&**client, &stored_id)
             .await
             .expect("load")
             .expect("the image should be there");
@@ -194,9 +194,65 @@ async fn an_event_can_be_created_invited_to_and_answered() {
     }
     // Anything that is not an image is refused on its bytes, not its name.
     assert!(
-        api::upload_cover(admin.clone(), "evil.png".to_owned(), b"#!/bin/sh".to_vec())
+        api::upload_image(admin.clone(), "evil.png".to_owned(), b"#!/bin/sh".to_vec())
             .await
             .is_err()
+    );
+
+    // ── The seating chart ──────────────────────────────────────────────────
+    let seat = |seat_index, x, y| SeatPlacement {
+        guest_id: dana.id,
+        seat_index,
+        x,
+        y,
+    };
+    api::save_seating(
+        admin.clone(),
+        event_id,
+        vec![
+            seat(0, 0.25, 0.5),
+            seat(1, 0.30, 0.5),
+            // A thousand screens away: pulled back into reach rather than
+            // refused, so one bad token cannot lose the whole arrangement.
+            seat(2, 1.0e9, 1.0e9),
+            // Not a number at all: there is no sensible place to put this.
+            seat(3, f64::NAN, 0.0),
+            // Someone else's guest, which this event must not be able to seat.
+            SeatPlacement {
+                guest_id: dana.id + 10_000,
+                seat_index: 0,
+                x: 0.1,
+                y: 0.1,
+            },
+        ],
+    )
+    .await
+    .expect("a chart should be saved");
+
+    let chart = api::seating_plan(admin.clone(), event_id)
+        .await
+        .expect("chart");
+    assert_eq!(chart.len(), 3);
+    assert!(chart.iter().all(|s| s.guest_id == dana.id));
+    assert_eq!((chart[0].x, chart[0].y), (0.25, 0.5));
+    assert!(chart[2].x.is_finite() && chart[2].x <= 4.0);
+
+    // A chart is replaced wholesale rather than merged: what is on screen is
+    // what gets stored.
+    api::save_seating(admin.clone(), event_id, vec![seat(0, 0.9, 0.9)])
+        .await
+        .expect("a chart should be replaceable");
+    let chart = api::seating_plan(admin.clone(), event_id)
+        .await
+        .expect("chart");
+    assert_eq!(chart.len(), 1);
+    assert_eq!(chart[0].x, 0.9);
+
+    assert!(
+        api::save_seating("nope".to_owned(), event_id, vec![seat(0, 0.1, 0.1)])
+            .await
+            .is_err(),
+        "a wrong admin token must not rearrange anyone"
     );
 
     // ── Authorisation ──────────────────────────────────────────────────────
@@ -335,6 +391,8 @@ async fn an_event_can_be_created_invited_to_and_answered() {
     assert!(log.contains(r#""kind":"cover_uploaded""#));
     assert!(log.contains(r#""kind":"contacts_imported""#));
     assert!(log.contains(r#""kind":"invite_marked_sent""#));
+    assert!(log.contains(r#""kind":"image_uploaded""#));
+    assert!(log.contains(r#""kind":"seating_saved""#));
     assert!(log.contains(r#""kind":"rsvp""#));
     assert!(log.contains("no nuts please"));
     // Both of Dana's answers are kept, not just the latest.
@@ -358,6 +416,14 @@ async fn an_event_can_be_created_invited_to_and_answered() {
             .expect("reply history should still be readable")
             .get(0);
         assert_eq!(history, 2);
+
+        // The chart, on the other hand, is about a room that no longer exists.
+        let seated: i64 = client
+            .query_one("SELECT COUNT(*) FROM seats", &[])
+            .await
+            .expect("the seating table should still be readable")
+            .get(0);
+        assert_eq!(seated, 0, "deleting an event clears its seating chart");
     }
 
     let _ = std::fs::remove_dir_all(&dir);
