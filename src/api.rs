@@ -39,10 +39,23 @@ fn guard(token: &str) -> Result<(), ServerFnError> {
     }
 }
 
+/// Reports a database failure, and turns it into a `ServerFnError`.
+///
+/// The detail never reaches the browser — a server function's error message is
+/// not sent to the client, which is right, since it would leak the schema. That
+/// makes recording it here the only account of what happened: without this
+/// line, something like a column the database does not have arrives as a bare
+/// 500 with nothing, anywhere, saying why.
+#[cfg(feature = "server")]
+fn db_error(e: String) -> ServerFnError {
+    eprintln!("hainviter: database error: {e}");
+    ServerFnError::new(e)
+}
+
 /// Checks out a database connection, as a `ServerFnError` on failure.
 #[cfg(feature = "server")]
 async fn conn() -> Result<deadpool_postgres::Object, ServerFnError> {
-    crate::db::client().await.map_err(ServerFnError::new)
+    crate::db::client().await.map_err(db_error)
 }
 
 // ---------------------------------------------------------------------------
@@ -77,9 +90,7 @@ pub async fn base_url() -> Result<String, ServerFnError> {
 pub async fn list_events(token: String) -> Result<Vec<EventSummary>, ServerFnError> {
     guard(&token)?;
     let client = conn().await?;
-    crate::db::list_events(&**client)
-        .await
-        .map_err(ServerFnError::new)
+    crate::db::list_events(&**client).await.map_err(db_error)
 }
 
 #[server(endpoint = "create_event")]
@@ -92,7 +103,7 @@ pub async fn create_event(token: String, input: EventInput) -> Result<i64, Serve
     let client = conn().await?;
     let id = crate::db::create_event(&**client, &input)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     crate::audit::record(
         "event_created",
         serde_json::json!({ "event_id": id, "title": input.title }),
@@ -110,7 +121,7 @@ pub async fn update_event(token: String, id: i64, input: EventInput) -> Result<(
     let client = conn().await?;
     let changed = crate::db::update_event(&**client, id, &input)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     if changed == 0 {
         return Err(ServerFnError::new(s().err_no_such_event));
     }
@@ -130,14 +141,14 @@ pub async fn delete_event(token: String, id: i64) -> Result<(), ServerFnError> {
     // `rsvp_log`.
     let title = crate::db::event_title(&**client, id)
         .await
-        .map_err(ServerFnError::new)?
+        .map_err(db_error)?
         .unwrap_or_else(|| "<unknown>".to_owned());
     let guests = crate::db::list_guests(&**client, id)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     crate::db::delete_event(&**client, id)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     crate::audit::record(
         "event_deleted",
         serde_json::json!({
@@ -156,7 +167,7 @@ pub async fn get_event(token: String, id: i64) -> Result<EventAdminView, ServerF
     let client = conn().await?;
     crate::db::event_admin_view(&**client, id)
         .await
-        .map_err(ServerFnError::new)?
+        .map_err(db_error)?
         .ok_or_else(|| ServerFnError::new(s().err_no_such_event))
 }
 
@@ -194,7 +205,7 @@ pub async fn add_guests(
     let mut client = conn().await?;
     let added = crate::db::add_guests(&mut client, event_id, &rows)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     crate::audit::record(
         "guests_added",
         serde_json::json!({ "event_id": event_id, "added": added, "names": names }),
@@ -252,7 +263,7 @@ pub async fn import_contacts(
     let mut client = conn().await?;
     let added = crate::db::add_guests(&mut client, event_id, &rows)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     crate::audit::record(
         "contacts_imported",
         serde_json::json!({
@@ -295,7 +306,7 @@ pub async fn update_guest(
     let client = conn().await?;
     crate::db::update_guest(&**client, guest_id, &name, max_party_size, &phone)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     crate::audit::record(
         "guest_updated",
         serde_json::json!({
@@ -329,7 +340,7 @@ pub async fn mark_invite_sent(
     let client = conn().await?;
     crate::db::set_invite_sent(&**client, guest_id, &at)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     crate::audit::record(
         "invite_marked_sent",
         serde_json::json!({ "guest_id": guest_id, "sent": sent }),
@@ -343,7 +354,7 @@ pub async fn delete_guest(token: String, guest_id: i64) -> Result<(), ServerFnEr
     let client = conn().await?;
     crate::db::delete_guest(&**client, guest_id)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     crate::audit::record("guest_deleted", serde_json::json!({ "guest_id": guest_id }));
     Ok(())
 }
@@ -356,7 +367,7 @@ pub async fn reset_guest(token: String, guest_id: i64) -> Result<(), ServerFnErr
     let client = conn().await?;
     crate::db::reset_guest(&**client, guest_id)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     crate::audit::record("guest_reset", serde_json::json!({ "guest_id": guest_id }));
     Ok(())
 }
@@ -369,7 +380,7 @@ pub async fn reissue_invite(token: String, guest_id: i64) -> Result<String, Serv
     let client = conn().await?;
     let changed = crate::db::reissue_guest_token(&**client, guest_id, &fresh)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     if changed == 0 {
         return Err(ServerFnError::new(s().err_no_such_guest));
     }
@@ -458,7 +469,7 @@ pub async fn get_invite(guest_token: String) -> Result<InviteView, ServerFnError
     let client = conn().await?;
     let found = crate::db::invite_by_token(&**client, &guest_token)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     let (_, _, mut view) = found.ok_or_else(|| ServerFnError::new(s().err_invite_not_found))?;
     view.closed = rsvp_closed(&view.event.rsvp_deadline);
     Ok(view)
@@ -476,7 +487,7 @@ pub async fn submit_rsvp(
     let mut client = conn().await?;
     let found = crate::db::invite_by_token(&**client, &guest_token)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     let (guest_id, event_id, view) =
         found.ok_or_else(|| ServerFnError::new(s().err_invite_not_found))?;
 
@@ -507,7 +518,7 @@ pub async fn submit_rsvp(
     };
     crate::db::record_rsvp(&mut client, &reply)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
 
     // Printed as well as recorded: a reply must be recoverable from container
     // logs alone, even if everything else were lost.
@@ -536,7 +547,7 @@ pub async fn submit_rsvp(
 
     let refreshed = crate::db::invite_by_token(&**client, &guest_token)
         .await
-        .map_err(ServerFnError::new)?;
+        .map_err(db_error)?;
     let (_, _, mut view) = refreshed.ok_or_else(|| ServerFnError::new(s().err_invite_not_found))?;
     view.closed = rsvp_closed(&view.event.rsvp_deadline);
     Ok(view)

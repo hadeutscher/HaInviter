@@ -139,7 +139,10 @@ coordination and no shared filesystem:
   every instance then reads back the same value. Without that, each replica would
   print a different admin link and only one of them would work.
 - **Migrations take a Postgres advisory lock**, so several instances starting at
-  once is safe — exactly one applies them.
+  once is safe — exactly one applies them. Each is identified by name rather
+  than by position, so two branches that both add one cannot claim the same
+  number and silently skip each other's; each is also idempotent, which is
+  what lets a database that missed one be repaired by simply starting up.
 - **The audit-log file is per-instance and optional.** The complete copies are the
   database and stdout.
 

@@ -25,11 +25,24 @@ const MIGRATION_LOCK: i64 = 0x4841_494E_5654_5201;
 // Schema
 // ---------------------------------------------------------------------------
 
-/// Migrations, applied in order; the highest applied index is recorded in
-/// `schema_version`, so adding one is append-only.
-const MIGRATIONS: &[&str] = &[
-    r"
-    CREATE TABLE events (
+/// Migrations, each identified by a name and applied at most once.
+///
+/// The name is the identity, not the position. Position is not safe: two
+/// branches that each append a migration both take the same index, so a
+/// database that ran one of them records that index and silently skips the
+/// other. The build then queries columns that were never added, and the failure
+/// surfaces as a 500 from whichever request touches them — a long way from the
+/// cause. Names are independent of what else has landed, so migrations can be
+/// written and merged in any order.
+///
+/// Every migration must be idempotent. A database migrated under the older
+/// numbering may have missed one, and is offered it again here; re-running must
+/// succeed rather than trip over the half that is already there.
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001-initial-schema",
+        r"
+    CREATE TABLE IF NOT EXISTS events (
         id              BIGSERIAL PRIMARY KEY,
         title           TEXT    NOT NULL,
         hosts           TEXT    NOT NULL DEFAULT '',
@@ -43,7 +56,7 @@ const MIGRATIONS: &[&str] = &[
         created_at      TEXT    NOT NULL
     );
 
-    CREATE TABLE guests (
+    CREATE TABLE IF NOT EXISTS guests (
         id              BIGSERIAL PRIMARY KEY,
         event_id        BIGINT  NOT NULL REFERENCES events (id) ON DELETE CASCADE,
         name            TEXT    NOT NULL,
@@ -55,13 +68,13 @@ const MIGRATIONS: &[&str] = &[
         responded_at    TEXT    NOT NULL DEFAULT '',
         created_at      TEXT    NOT NULL
     );
-    CREATE INDEX guests_event_idx ON guests (event_id);
-    CREATE UNIQUE INDEX guests_event_name_idx ON guests (event_id, lower(name));
+    CREATE INDEX IF NOT EXISTS guests_event_idx ON guests (event_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS guests_event_name_idx ON guests (event_id, lower(name));
 
     -- Append-only history of every reply ever received. Deliberately carries no
     -- foreign key: deleting a guest or an event must never erase the record of
     -- what they answered.
-    CREATE TABLE rsvp_log (
+    CREATE TABLE IF NOT EXISTS rsvp_log (
         id          BIGSERIAL PRIMARY KEY,
         at          TEXT    NOT NULL,
         event_id    BIGINT  NOT NULL,
@@ -72,11 +85,11 @@ const MIGRATIONS: &[&str] = &[
         party_size  BIGINT  NOT NULL,
         note        TEXT    NOT NULL
     );
-    CREATE INDEX rsvp_log_event_idx ON rsvp_log (event_id);
+    CREATE INDEX IF NOT EXISTS rsvp_log_event_idx ON rsvp_log (event_id);
 
     -- Cover images live in the database so that replicas need no shared
     -- filesystem. They are a handful of photographs, not a media library.
-    CREATE TABLE cover_images (
+    CREATE TABLE IF NOT EXISTS cover_images (
         id           TEXT NOT NULL PRIMARY KEY,
         content_type TEXT NOT NULL,
         bytes        BYTEA NOT NULL,
@@ -85,18 +98,22 @@ const MIGRATIONS: &[&str] = &[
 
     -- Process-wide settings that must be identical across replicas; currently
     -- just the generated admin token.
-    CREATE TABLE settings (
+    CREATE TABLE IF NOT EXISTS settings (
         key   TEXT NOT NULL PRIMARY KEY,
         value TEXT NOT NULL
     );
     ",
-    r"
+    ),
+    (
+        "0002-guest-contact-details",
+        r"
     -- Contact details imported from vCards, and the host's own record of who
     -- they have already sent to. Both default to empty, so an existing guest
     -- list needs no backfill.
-    ALTER TABLE guests ADD COLUMN phone          TEXT NOT NULL DEFAULT '';
-    ALTER TABLE guests ADD COLUMN invite_sent_at TEXT NOT NULL DEFAULT '';
+    ALTER TABLE guests ADD COLUMN IF NOT EXISTS phone          TEXT NOT NULL DEFAULT '';
+    ALTER TABLE guests ADD COLUMN IF NOT EXISTS invite_sent_at TEXT NOT NULL DEFAULT '';
     ",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -152,27 +169,71 @@ pub async fn client() -> Result<deadpool_postgres::Object, String> {
         .map_err(|e| format!("no database connection available: {e}"))
 }
 
-async fn migrate(client: &mut deadpool_postgres::Object) -> Result<(), tokio_postgres::Error> {
+async fn migrate(client: &mut tokio_postgres::Client) -> Result<(), tokio_postgres::Error> {
     let tx = client.transaction().await?;
     // Serialises concurrent replicas; released when this transaction ends.
     tx.query("SELECT pg_advisory_xact_lock($1)", &[&MIGRATION_LOCK])
         .await?;
-    tx.batch_execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
-        .await?;
-    let applied: i32 = tx
-        .query_one("SELECT COALESCE(MAX(version), 0) FROM schema_version", &[])
+    tx.batch_execute(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+             name       TEXT NOT NULL PRIMARY KEY,
+             applied_at TEXT NOT NULL
+         )",
+    )
+    .await?;
+
+    // A database migrated under the older numbering records only a count, in
+    // `schema_version`. Its first entry is the base schema, which every branch
+    // shares, so that one carries over. Nothing after it can: a number does not
+    // say which migration claimed it, and two branches may each have claimed
+    // the same one. Those are simply offered again below, which costs nothing
+    // because each is idempotent — and is precisely what repairs a database
+    // that silently skipped one.
+    let legacy: bool = tx
+        .query_one(
+            "SELECT EXISTS (
+                 SELECT 1 FROM information_schema.tables
+                  WHERE table_schema = current_schema() AND table_name = 'schema_version'
+             )",
+            &[],
+        )
         .await?
         .get(0);
+    if legacy {
+        let version: i32 = tx
+            .query_one("SELECT COALESCE(MAX(version), 0) FROM schema_version", &[])
+            .await?
+            .get(0);
+        if version >= 1
+            && let Some((base, _)) = MIGRATIONS.first()
+        {
+            tx.execute(
+                "INSERT INTO schema_migrations (name, applied_at) VALUES ($1, $2)
+                 ON CONFLICT DO NOTHING",
+                &[base, &now()],
+            )
+            .await?;
+        }
+    }
 
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(applied.max(0) as usize) {
-        let version = i as i32 + 1;
+    for &(name, sql) in MIGRATIONS {
+        let done: bool = tx
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                &[&name],
+            )
+            .await?
+            .get(0);
+        if done {
+            continue;
+        }
         tx.batch_execute(sql).await?;
         tx.execute(
-            "INSERT INTO schema_version (version) VALUES ($1)",
-            &[&version],
+            "INSERT INTO schema_migrations (name, applied_at) VALUES ($1, $2)",
+            &[&name, &now()],
         )
         .await?;
-        println!("db: applied migration {version}");
+        println!("db: applied migration {name}");
     }
     tx.commit().await
 }
@@ -662,4 +723,122 @@ pub async fn record_rsvp(
     .await
     .map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "server"))]
+mod tests {
+    //! Exercises the migration runner against the scratch database named by
+    //! `HAINVITER_TEST_DATABASE_URL`, in a schema of its own so it cannot
+    //! collide with the end-to-end test — which drops `public` wholesale.
+
+    use super::*;
+
+    /// Connects to the scratch database and hands back a client pointed at an
+    /// empty schema of this test's own. `None` means no database is configured.
+    async fn scratch(schema: &str) -> Option<tokio_postgres::Client> {
+        let url = std::env::var("HAINVITER_TEST_DATABASE_URL")
+            .ok()
+            .filter(|u| !u.trim().is_empty())?;
+        let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .expect("the test database should be reachable");
+        tokio::spawn(connection);
+        client
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE;
+                 CREATE SCHEMA {schema};
+                 SET search_path TO {schema};"
+            ))
+            .await
+            .expect("a schema of our own");
+        Some(client)
+    }
+
+    async fn has_column(client: &tokio_postgres::Client, table: &str, column: &str) -> bool {
+        client
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM information_schema.columns
+                      WHERE table_schema = current_schema()
+                        AND table_name = $1 AND column_name = $2
+                 )",
+                &[&table, &column],
+            )
+            .await
+            .expect("column lookup")
+            .get(0)
+    }
+
+    /// The failure this runner exists to prevent.
+    ///
+    /// Two branches each appended a migration, so both claimed number 2. A
+    /// database that ran the other branch's recorded "2" and skipped this one,
+    /// and every later query for a guest's phone failed — a 500 from
+    /// `get_event`, a long way from the cause. Naming the migrations fixes it,
+    /// and, because they are idempotent, repairs such a database in place.
+    #[tokio::test]
+    async fn a_migration_another_branch_numbered_over_is_still_applied() {
+        let Some(mut client) = scratch("migration_collision").await else {
+            if std::env::var("HAINVITER_REQUIRE_DB").is_ok() {
+                panic!("HAINVITER_TEST_DATABASE_URL must be set when HAINVITER_REQUIRE_DB is");
+            }
+            eprintln!("\n  SKIPPED: set HAINVITER_TEST_DATABASE_URL to run the migration tests.\n");
+            return;
+        };
+
+        migrate(&mut client).await.expect("a clean migration");
+        assert!(has_column(&client, "guests", "phone").await);
+
+        // Rewind to a database that predates named migrations and whose
+        // number 2 belonged to some other branch: the contact columns were
+        // never added, but the counter claims two migrations are done.
+        client
+            .batch_execute(
+                "DROP TABLE schema_migrations;
+                 CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 INSERT INTO schema_version (version) VALUES (1), (2);
+                 ALTER TABLE guests DROP COLUMN phone, DROP COLUMN invite_sent_at;",
+            )
+            .await
+            .expect("rewind");
+        assert!(!has_column(&client, "guests", "phone").await);
+
+        migrate(&mut client).await.expect("a repairing migration");
+        assert!(
+            has_column(&client, "guests", "phone").await,
+            "the skipped migration must be applied rather than assumed done"
+        );
+        assert!(has_column(&client, "guests", "invite_sent_at").await);
+
+        client
+            .batch_execute("DROP SCHEMA migration_collision CASCADE")
+            .await
+            .expect("cleanup");
+    }
+
+    /// Migrating twice must not fail, and must not apply anything twice.
+    #[tokio::test]
+    async fn migrating_an_up_to_date_database_does_nothing() {
+        let Some(mut client) = scratch("migration_idempotent").await else {
+            return;
+        };
+
+        migrate(&mut client).await.expect("first");
+        migrate(&mut client).await.expect("second");
+        let applied: i64 = client
+            .query_one("SELECT COUNT(*) FROM schema_migrations", &[])
+            .await
+            .expect("count")
+            .get(0);
+        assert_eq!(applied as usize, MIGRATIONS.len());
+
+        client
+            .batch_execute("DROP SCHEMA migration_idempotent CASCADE")
+            .await
+            .expect("cleanup");
+    }
 }
