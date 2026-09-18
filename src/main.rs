@@ -10,6 +10,7 @@
 //! PostgreSQL, which is what lets the deployment run more than one replica.
 
 mod api;
+mod contacts;
 mod i18n;
 mod types;
 mod ui;
@@ -252,7 +253,11 @@ async fn export_csv(
     };
 
     let base = std::env::var("HAINVITER_BASE_URL").unwrap_or_default();
-    let body = export::responses_csv(&view.guests, &base);
+    let body = export::responses_csv(
+        &view.guests,
+        &base,
+        i18n::from_env().strings().invite_message,
+    );
     let filename = format!("{}-responses.csv", export::slug(&view.event.title));
     audit::record(
         "responses_exported",

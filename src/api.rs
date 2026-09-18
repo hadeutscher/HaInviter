@@ -10,12 +10,17 @@
 
 use crate::{
     i18n::Locale,
-    types::{EventAdminView, EventInput, EventSummary, InviteView, RsvpSubmission},
+    types::{EventAdminView, EventInput, EventSummary, ImportSummary, InviteView, RsvpSubmission},
 };
 use dioxus::prelude::*;
 
 /// Largest cover image we accept, in bytes.
 pub const MAX_COVER_BYTES: usize = 8 * 1024 * 1024;
+
+/// Largest `.vcf` we accept, in bytes. A whole phone address book exported at
+/// once is a few hundred kilobytes; this leaves generous room above that while
+/// still refusing something that is plainly not a contact file.
+pub const MAX_VCF_BYTES: usize = 2 * 1024 * 1024;
 
 /// The active locale's strings, for messages that reach the user.
 #[cfg(feature = "server")]
@@ -175,11 +180,17 @@ pub async fn add_guests(
     if parsed.is_empty() {
         return Err(ServerFnError::new(s().err_no_names));
     }
-    let rows: Vec<(String, i64, String)> = parsed
+    let rows: Vec<crate::db::NewGuest> = parsed
         .into_iter()
-        .map(|(name, size)| (name, size, crate::auth::new_token()))
+        .map(|(name, max_party_size)| crate::db::NewGuest {
+            name,
+            max_party_size,
+            token: crate::auth::new_token(),
+            // Pasted names carry no number; importing contacts later fills it in.
+            phone: String::new(),
+        })
         .collect();
-    let names: Vec<&String> = rows.iter().map(|(n, _, _)| n).collect();
+    let names: Vec<&String> = rows.iter().map(|g| &g.name).collect();
     let mut client = conn().await?;
     let added = crate::db::add_guests(&mut client, event_id, &rows)
         .await
@@ -191,28 +202,139 @@ pub async fn add_guests(
     Ok(added)
 }
 
+/// Adds guests from a `.vcf` shared out of a phone's address book.
+///
+/// A contact whose number cannot be normalised is still added — losing the
+/// number costs the host one tap, losing the guest costs them a guest.
+#[server(endpoint = "import_contacts")]
+pub async fn import_contacts(
+    token: String,
+    event_id: i64,
+    bytes: Vec<u8>,
+    default_party_size: i64,
+) -> Result<ImportSummary, ServerFnError> {
+    guard(&token)?;
+    if bytes.is_empty() {
+        return Err(ServerFnError::new(s().err_file_empty));
+    }
+    if bytes.len() > MAX_VCF_BYTES {
+        return Err(ServerFnError::new(
+            s().field_cover_too_large
+                .replace("{}", &(MAX_VCF_BYTES / (1024 * 1024)).to_string()),
+        ));
+    }
+
+    // Lossy on purpose: a card written in some other encoding should cost one
+    // mangled character, not the whole import.
+    let text = String::from_utf8_lossy(&bytes);
+    let contacts = crate::contacts::parse_vcards(&text);
+    if contacts.is_empty() {
+        return Err(ServerFnError::new(s().err_no_contacts));
+    }
+
+    let region = crate::contacts::default_region();
+    let max_party_size = default_party_size.clamp(1, 50);
+    let mut without_phone = 0usize;
+    let mut rows: Vec<crate::db::NewGuest> = Vec::with_capacity(contacts.len());
+    for contact in &contacts {
+        let phone = crate::contacts::to_e164(&contact.phone, &region).unwrap_or_default();
+        if phone.is_empty() {
+            without_phone += 1;
+        }
+        rows.push(crate::db::NewGuest {
+            name: contact.name.clone(),
+            max_party_size,
+            token: crate::auth::new_token(),
+            phone,
+        });
+    }
+
+    let mut client = conn().await?;
+    let added = crate::db::add_guests(&mut client, event_id, &rows)
+        .await
+        .map_err(ServerFnError::new)?;
+    crate::audit::record(
+        "contacts_imported",
+        serde_json::json!({
+            "event_id": event_id,
+            "found": contacts.len(),
+            "added": added,
+            "without_phone": without_phone,
+        }),
+    );
+    Ok(ImportSummary {
+        found: contacts.len(),
+        added,
+        without_phone,
+    })
+}
+
 #[server(endpoint = "update_guest")]
 pub async fn update_guest(
     token: String,
     guest_id: i64,
     name: String,
     max_party_size: i64,
-) -> Result<(), ServerFnError> {
+    phone: String,
+) -> Result<String, ServerFnError> {
     guard(&token)?;
     let name = name.trim().to_owned();
     if name.is_empty() {
         return Err(ServerFnError::new(s().err_guest_needs_name));
     }
     let max_party_size = max_party_size.clamp(1, 50);
+    // A number typed by hand is normalised exactly like an imported one, so the
+    // two cannot drift into different formats in the same column. Something
+    // unparseable is rejected rather than stored, because a wrong number in a
+    // link is worse than no link at all.
+    let phone = match phone.trim() {
+        "" => String::new(),
+        raw => crate::contacts::to_e164(raw, &crate::contacts::default_region())
+            .ok_or_else(|| ServerFnError::new(s().err_bad_phone))?,
+    };
     let client = conn().await?;
-    crate::db::update_guest(&**client, guest_id, &name, max_party_size)
+    crate::db::update_guest(&**client, guest_id, &name, max_party_size, &phone)
         .await
         .map_err(ServerFnError::new)?;
     crate::audit::record(
         "guest_updated",
-        serde_json::json!({ "guest_id": guest_id, "name": name, "max_party_size": max_party_size }),
+        serde_json::json!({
+            "guest_id": guest_id,
+            "name": name,
+            "max_party_size": max_party_size,
+            "has_phone": !phone.is_empty(),
+        }),
     );
-    Ok(())
+    Ok(phone)
+}
+
+/// Records whether the host has sent this guest their invitation.
+///
+/// The sending itself happens in WhatsApp — or wherever the share sheet leads —
+/// so this is the host's own bookkeeping rather than a delivery receipt. It is
+/// stored rather than kept in the browser so the same list read from a phone
+/// and from a laptop agrees with itself.
+#[server(endpoint = "mark_invite_sent")]
+pub async fn mark_invite_sent(
+    token: String,
+    guest_id: i64,
+    sent: bool,
+) -> Result<String, ServerFnError> {
+    guard(&token)?;
+    let at = if sent {
+        crate::db::now()
+    } else {
+        String::new()
+    };
+    let client = conn().await?;
+    crate::db::set_invite_sent(&**client, guest_id, &at)
+        .await
+        .map_err(ServerFnError::new)?;
+    crate::audit::record(
+        "invite_marked_sent",
+        serde_json::json!({ "guest_id": guest_id, "sent": sent }),
+    );
+    Ok(at)
 }
 
 #[server(endpoint = "delete_guest")]
