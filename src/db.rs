@@ -19,6 +19,10 @@ use tokio_postgres::{GenericClient, NoTls};
 
 static POOL: OnceLock<Pool> = OnceLock::new();
 
+/// A table the base schema creates, used to recognise a database that already
+/// has that schema. No migration may rename or drop this one.
+const BASE_SCHEMA_SENTINEL: &str = "events";
+
 /// Identifies the migration advisory lock. Several replicas start at once, and
 /// exactly one of them may apply a migration.
 const MIGRATION_LOCK: i64 = 0x4841_494E_5654_5201;
@@ -37,9 +41,15 @@ const MIGRATION_LOCK: i64 = 0x4841_494E_5654_5201;
 /// cause. Names are independent of what else has landed, so migrations can be
 /// written and merged in any order.
 ///
-/// Every migration must be idempotent. A database migrated under the older
-/// numbering may have missed one, and is offered it again here; re-running must
-/// succeed rather than trip over the half that is already there.
+/// Every migration must converge when it is offered a second time. A database
+/// migrated under the older numbering may have missed one and is offered it
+/// again here, so "runs cleanly against a database that already has it" is the
+/// requirement — which is more than writing `IF NOT EXISTS` and stopping there.
+/// A migration that renames or drops something an earlier one created has to
+/// check both ends, that the old object is still present *and* that the new one
+/// is not, because either may already be true.
+///
+/// The base schema is exempt: it is never offered twice. See [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0001-initial-schema",
@@ -229,35 +239,37 @@ async fn migrate(client: &mut tokio_postgres::Client) -> Result<(), tokio_postgr
     )
     .await?;
 
-    // A database migrated under the older numbering records only a count, in
-    // `schema_version`. Its first entry is the base schema, which every branch
-    // shares, so that one carries over. Nothing after it can: a number does not
-    // say which migration claimed it, and two branches may each have claimed
-    // the same one. Those are simply offered again below, which costs nothing
-    // because each is idempotent — and is precisely what repairs a database
-    // that silently skipped one.
-    let legacy: bool = tx
-        .query_one(
-            "SELECT EXISTS (
-                 SELECT 1 FROM information_schema.tables
-                  WHERE table_schema = current_schema() AND table_name = 'schema_version'
-             )",
-            &[],
-        )
-        .await?
-        .get(0);
-    if legacy {
-        let version: i32 = tx
-            .query_one("SELECT COALESCE(MAX(version), 0) FROM schema_version", &[])
+    // The base schema counts as applied whenever it is already there, whatever
+    // the ledger says. That covers a database migrated under the older
+    // numbering — which recorded only a count, in `schema_version` — and one
+    // whose ledger has been lost or truncated.
+    //
+    // Deciding it from the schema rather than from a counter is what keeps the
+    // base schema from ever being replayed, and replaying it would be worse
+    // than useless: later migrations rename and drop the objects it creates, so
+    // running it again against a live database puts an empty table back beside
+    // the one that replaced it. Ruling that out here means no later migration
+    // has to defend against it.
+    //
+    // Everything after the base is offered again, which costs nothing because
+    // each migration converges — and is precisely what repairs a database that
+    // silently skipped one.
+    if let Some((base, _)) = MIGRATIONS.first() {
+        let already_there: bool = tx
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM information_schema.tables
+                      WHERE table_schema = current_schema() AND table_name = $1
+                 )",
+                &[&BASE_SCHEMA_SENTINEL],
+            )
             .await?
             .get(0);
-        if version >= 1
-            && let Some((base, _)) = MIGRATIONS.first()
-        {
+        if already_there {
             tx.execute(
                 "INSERT INTO schema_migrations (name, applied_at) VALUES ($1, $2)
                  ON CONFLICT DO NOTHING",
-                &[base, &now()],
+                &[&base, &now()],
             )
             .await?;
         }
@@ -948,6 +960,51 @@ mod tests {
 
         client
             .batch_execute("DROP SCHEMA migration_collision CASCADE")
+            .await
+            .expect("cleanup");
+    }
+
+    /// Losing the ledger must not put back what a later migration renamed away.
+    ///
+    /// Reported by the seating chart session. Its migration renames
+    /// `cover_images` to `images`. Were the base schema replayed, its
+    /// `CREATE TABLE IF NOT EXISTS cover_images` would see no such table and
+    /// make an empty one beside the live `images` — and the rename, offered
+    /// again in the same pass, would collide with the table it had just
+    /// produced. The base schema is recognised from the schema itself precisely
+    /// so that this cannot arise, whatever a later migration does to its
+    /// tables.
+    #[tokio::test]
+    async fn a_lost_ledger_does_not_resurrect_what_a_later_migration_renamed() {
+        let Some(mut client) = scratch("migration_lost_ledger").await else {
+            return;
+        };
+        migrate(&mut client).await.expect("a clean migration");
+        // The seating migration has already renamed `cover_images` to `images`,
+        // so this is no longer a hypothetical.
+        assert!(!has_table(&client, "cover_images").await);
+
+        // Lose every record of what has been applied, as a restored dump or a
+        // hand-repaired database might.
+        client
+            .batch_execute("DELETE FROM schema_migrations")
+            .await
+            .expect("lose the ledger");
+
+        migrate(&mut client)
+            .await
+            .expect("a migration with no ledger");
+        assert!(
+            !has_table(&client, "cover_images").await,
+            "the base schema must not be replayed over a database that has moved on"
+        );
+        assert!(
+            has_table(&client, "images").await,
+            "the live table survives"
+        );
+
+        client
+            .batch_execute("DROP SCHEMA migration_lost_ledger CASCADE")
             .await
             .expect("cleanup");
     }
