@@ -2191,9 +2191,9 @@ dependencies = [
 
 [[package]]
 name = "haboard"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "674b03aa3b1bfca68014a1c8e4e122f9c5c32ce956d07191655ec7b0d0156202"
+checksum = "a7ad2d275eed228c5c38d5ef3ece7ead309846fd9d2077587c7a1a2958adfa50"
 dependencies = [
  "base64 0.22.1",
  "bytemuck",
