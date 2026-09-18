@@ -10,7 +10,10 @@
 
 use crate::{
     i18n::Locale,
-    types::{EventAdminView, EventInput, EventSummary, ImportSummary, InviteView, RsvpSubmission, SeatPlacement},
+    types::{
+        EventAdminView, EventInput, EventSummary, ImportSummary, InviteView, RsvpSubmission,
+        SeatPlacement,
+    },
 };
 use dioxus::prelude::*;
 
@@ -220,7 +223,7 @@ pub async fn import_contacts(
     }
     if bytes.len() > MAX_VCF_BYTES {
         return Err(ServerFnError::new(
-            s().field_cover_too_large
+            s().field_image_too_large
                 .replace("{}", &(MAX_VCF_BYTES / (1024 * 1024)).to_string()),
         ));
     }
