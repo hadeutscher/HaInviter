@@ -270,6 +270,12 @@ struct Board {
     /// against.
     stage: Rect,
     /// Device pixel ratio, so a token is the same size to the eye on any screen.
+    ///
+    /// Token rectangles follow it, but their textures do not: those are
+    /// rasterised once, at the ratio in force when the chart was built. Zooming
+    /// in therefore costs sharpness until the chart is reopened. Closing that
+    /// properly needs a way to re-upload one drawable's image, which haboard
+    /// does not yet expose.
     scale: f32,
     /// Whether a nudge is being held back until the key it came from is
     /// released. See [`commits`].
@@ -370,9 +376,14 @@ impl Board {
         };
         let (width, height) = scene.size();
         let now = seating::stage_rect(width as f32, height as f32, map_size, scale);
-        if now == was {
+        if now == was && scale == self.scale {
             return;
         }
+        // A token is a fixed size to the eye, not a fixed number of pixels, so
+        // its rectangle is re-derived whenever the device pixel ratio moves
+        // under it — which browser zoom does, as does dragging the window to a
+        // monitor of a different density.
+        let (w, h) = (TOKEN_W * scale, TOKEN_H * scale);
         for piece in scene.drawables.iter_mut() {
             if piece.is_backdrop() {
                 piece.x = now.x;
@@ -382,6 +393,8 @@ impl Board {
             } else {
                 let (nx, ny) = seating::normalise(was, piece.x, piece.y);
                 (piece.x, piece.y) = seating::place(now, nx, ny);
+                piece.w = w;
+                piece.h = h;
             }
         }
         self.stage = now;
