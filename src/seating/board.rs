@@ -227,6 +227,8 @@ fn start(canvas_id: &str) {
         stage: Rect::default(),
         scale: 1.0,
         deferred: false,
+        pointers: 0,
+        refit_pending: false,
     });
 }
 
@@ -280,6 +282,11 @@ struct Board {
     /// Whether a nudge is being held back until the key it came from is
     /// released. See [`commits`].
     deferred: bool,
+    /// How many pointers are down: one for a held mouse button, one per finger.
+    pointers: u32,
+    /// Whether a refit is owed once the last of them lifts. See
+    /// [`track_pointers`](Board::track_pointers).
+    refit_pending: bool,
 }
 
 impl Board {
@@ -399,6 +406,46 @@ impl Board {
         }
         self.stage = now;
         self.scale = scale;
+    }
+
+    /// Counts pointers going down and coming up.
+    ///
+    /// A refit moves every token so it stays on the same spot of the venue
+    /// plan. haboard, though, captures a drag's starting positions in pixels
+    /// when the pointer goes down and recomputes `start + delta` on every move,
+    /// so anything the chart does to a dragged token underneath a live gesture
+    /// is discarded on the very next move — leaving it placed against a stage
+    /// that no longer exists, permanently, because no later refit will disturb
+    /// it. A refit arriving mid-gesture is therefore held until the last pointer
+    /// lifts.
+    ///
+    /// Deferring is not merely safer, it is also the correct frame: the venue
+    /// plan does not move while the refit is held, so the spot the guest was
+    /// dropped on is the spot on the *old* stage, which is exactly what the
+    /// deferred refit measures against.
+    fn track_pointers(&mut self, event: &WindowEvent) {
+        match event {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => self.pointers += 1,
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => self.pointers = self.pointers.saturating_sub(1),
+            WindowEvent::Touch(touch) => match touch.phase {
+                TouchPhase::Started => self.pointers += 1,
+                TouchPhase::Ended | TouchPhase::Cancelled => {
+                    self.pointers = self.pointers.saturating_sub(1)
+                }
+                TouchPhase::Moved => {}
+            },
+            // A window that loses focus never sees the button come back up.
+            WindowEvent::Focused(false) => self.pointers = 0,
+            _ => {}
+        }
     }
 
     /// Hands the arrangement now on screen back to the application.
@@ -549,7 +596,12 @@ impl ApplicationHandler<Ready> for Board {
             Some(scene) => scene.handle_window_event(&event),
             None => return,
         };
+        self.track_pointers(&event);
         if matches!(event, WindowEvent::Resized(_)) {
+            self.refit_pending = true;
+        }
+        if self.refit_pending && self.pointers == 0 {
+            self.refit_pending = false;
             self.refit();
         }
         if flushes(&event) && self.deferred {
