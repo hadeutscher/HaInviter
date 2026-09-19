@@ -226,6 +226,7 @@ fn start(canvas_id: &str) {
         map_size: None,
         stage: Rect::default(),
         scale: 1.0,
+        deferred: false,
     });
 }
 
@@ -270,6 +271,9 @@ struct Board {
     stage: Rect,
     /// Device pixel ratio, so a token is the same size to the eye on any screen.
     scale: f32,
+    /// Whether a nudge is being held back until the key it came from is
+    /// released. See [`commits`].
+    deferred: bool,
 }
 
 impl Board {
@@ -417,28 +421,76 @@ impl Board {
     }
 }
 
-/// Whether handling `event` may have finished a change worth saving: the end of
-/// a drag, or a keystroke that edits.
-fn commits(event: &WindowEvent) -> bool {
+/// What handling `event` means for saving.
+enum Commit {
+    /// A change finished; publish it.
+    Now,
+    /// A change happened but more are coming; hold it until they stop.
+    Defer,
+    /// Nothing worth saving.
+    No,
+}
+
+/// Whether handling `event` finished a change worth saving.
+///
+/// A held arrow key repeats at the keyboard's own rate and every repeat is a
+/// real nudge, so treating each as finished asks the server to rewrite the whole
+/// chart tens of times a second for what the guest arranging it experiences as
+/// one gesture. Repeats are deferred instead: the position that matters is the
+/// one the key comes up on, and [`publish`] sends the entire arrangement anyway,
+/// so nothing is lost by waiting for it.
+///
+/// [`publish`]: Board::publish
+fn commits(event: &WindowEvent) -> Commit {
     match event {
         WindowEvent::MouseInput {
             state: ElementState::Released,
             button: MouseButton::Left,
             ..
-        }
-        | WindowEvent::KeyboardInput {
+        } => Commit::Now,
+        WindowEvent::KeyboardInput {
             event:
                 winit::event::KeyEvent {
                     state: ElementState::Pressed,
+                    repeat,
                     ..
                 },
             ..
-        } => true,
-        WindowEvent::Touch(touch) => {
-            matches!(touch.phase, TouchPhase::Ended | TouchPhase::Cancelled)
+        } => {
+            if *repeat {
+                Commit::Defer
+            } else {
+                Commit::Now
+            }
         }
-        _ => false,
+        WindowEvent::Touch(touch) => {
+            if matches!(touch.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                Commit::Now
+            } else {
+                Commit::No
+            }
+        }
+        _ => Commit::No,
     }
+}
+
+/// Whether `event` ends a run of key repeats, and so releases whatever
+/// [`Commit::Defer`] has been holding.
+///
+/// A key coming up is never "handled" by the scene — it only acts on presses —
+/// so this is asked before the handled check rather than through it. Losing
+/// focus counts too: a window that goes away mid-nudge still has to save.
+fn flushes(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::KeyboardInput {
+            event: winit::event::KeyEvent {
+                state: ElementState::Released,
+                ..
+            },
+            ..
+        } | WindowEvent::Focused(false)
+    )
 }
 
 impl ApplicationHandler<Ready> for Board {
@@ -487,8 +539,20 @@ impl ApplicationHandler<Ready> for Board {
         if matches!(event, WindowEvent::Resized(_)) {
             self.refit();
         }
-        if handled && commits(&event) {
+        if flushes(&event) && self.deferred {
+            self.deferred = false;
             self.publish();
+            return;
+        }
+        if handled {
+            match commits(&event) {
+                Commit::Now => {
+                    self.deferred = false;
+                    self.publish();
+                }
+                Commit::Defer => self.deferred = true,
+                Commit::No => {}
+            }
         }
     }
 }
