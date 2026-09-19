@@ -200,32 +200,21 @@ async fn draw(chart: Chart, arranged: Signal<Option<Vec<SeatPlacement>>>) {
     use crate::seating::board;
 
     let (map, arrivals, seats) = chart;
-    // Tokens are rasterised at the display's own resolution so the names on them
-    // are not a blurry approximation on a retina screen. The cap keeps a very
-    // dense display from turning a long guest list into a pile of large
-    // textures.
-    let scale = web_sys::window()
-        .map(|window| window.device_pixel_ratio() as f32)
-        .unwrap_or(1.0)
-        .clamp(1.0, 3.0);
-
     let map = match map.trim() {
         "" => None,
         url => board::map_image(url).await,
     };
+    // Labels and colours rather than finished images: the board rasterises
+    // them, because it is the half that knows the display's pixel ratio and has
+    // to draw them again when browser zoom changes it.
     let tokens = arrivals
         .into_iter()
-        .filter_map(|arrival| {
-            Some(board::Pending {
-                guest_id: arrival.guest_id,
-                seat_index: arrival.seat_index,
-                at: seating::placement_of(&seats, &arrival),
-                image: board::token_image(
-                    &arrival.label(),
-                    seating::hue_for(arrival.guest_id),
-                    scale,
-                )?,
-            })
+        .map(|arrival| board::Pending {
+            guest_id: arrival.guest_id,
+            seat_index: arrival.seat_index,
+            at: seating::placement_of(&seats, &arrival),
+            hue: seating::hue_for(arrival.guest_id),
+            label: arrival.label(),
         })
         .collect();
 

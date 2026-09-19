@@ -1,38 +1,32 @@
 //! The seating chart's drawing surface: a [haboard] scene on a canvas.
 //!
-//! haboard is a GPU sprite engine driven by a [`winit`] event loop, and a
-//! browser page gets exactly one event loop, bound for good to the canvas it was
-//! created with. That single fact shapes everything here:
+//! haboard's core knows nothing about windowing, so the chart owns everything
+//! around it — the canvas, the DOM listeners, the resize observer and the frame
+//! loop — and feeds the scene [`Input`]s. Nothing here adopts an event loop, and
+//! winit is not in the dependency graph at all.
 //!
-//! * The loop is started once, on the first chart anyone opens, and then runs
-//!   for the life of the page. Closing the window hides the canvas rather than
-//!   stopping anything, and [`hide`] is what stops the frames.
-//! * The loop owns the scene, so the rest of the application cannot reach in and
-//!   change it. Charts are handed over through [`show`] and picked up on the
-//!   next turn of the loop; arrangements come back the other way through a
-//!   signal, which is the one thing a Dioxus component can be written to from
-//!   outside its own render.
-//! * A new chart means a new scene, and a scene owns its engine, so switching
-//!   events rebuilds both. haboard's collection can be added to but not emptied,
-//!   and a stale guest left on the chart would be worse than a moment's rebuild.
+//! Two consequences worth knowing:
+//!
+//! * The scene is ordinary state, not something a foreign loop owns, so the
+//!   chart is handed over by calling [`show`] and the arrangement comes back
+//!   through a signal because that is how a Dioxus component is written to from
+//!   outside its own render — not because anything is being smuggled past a
+//!   framework.
+//! * `Engine::from_canvas` is asynchronous, since asking for a GPU adapter and
+//!   device are both futures in a browser. That is the one piece of ceremony the
+//!   design cannot remove, and it shows up here as a scene that is `None` until
+//!   it is ready.
 //!
 //! [haboard]: https://crates.io/crates/haboard
 
-use std::{
-    cell::{Cell, RefCell},
-    sync::Arc,
-};
+use std::{cell::RefCell, rc::Rc};
 
 use dioxus::prelude::{Signal, WritableExt};
-use haboard::{Drawable, Engine, ImageData, Scene, SceneMode};
-use wasm_bindgen::{JsCast, JsValue};
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlImageElement};
-use winit::{
-    application::ApplicationHandler,
-    event::{ElementState, MouseButton, TouchPhase, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
-    platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys},
-    window::{Window, WindowId},
+use haboard::{Drawable, Engine, ImageData, Input, PointerId, PointerPhase, Scene, SceneMode, web};
+use wasm_bindgen::{JsCast, JsValue, prelude::Closure};
+use web_sys::{
+    HtmlCanvasElement, KeyboardEvent, PointerEvent, ResizeObserver, ResizeObserverBoxOptions,
+    ResizeObserverOptions,
 };
 
 use crate::{
@@ -49,18 +43,23 @@ const BACKDROP_Z: f32 = -1.0;
 // What gets drawn
 // ---------------------------------------------------------------------------
 
-/// Which of the two things on the chart a [`Piece`] is.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    /// The plan of the venue.
-    Backdrop,
-    /// One arriving person.
-    Token { guest_id: i64, seat_index: i64 },
+/// What a token says and what colour it says it in.
+///
+/// Kept so the token can be drawn again at a different resolution: browser zoom
+/// changes the device pixel ratio, and a label rasterised for the old one is
+/// blurry at the new.
+#[derive(Clone)]
+struct Face {
+    label: String,
+    hue: f64,
 }
 
-/// One drawable on the chart.
+/// One drawable on the chart: the venue plan, or one arriving person.
 struct Piece {
-    kind: Kind,
+    /// `None` for the venue plan, which has no label and cannot be touched.
+    face: Option<Face>,
+    guest_id: i64,
+    seat_index: i64,
     x: f32,
     y: f32,
     z: f32,
@@ -71,7 +70,7 @@ struct Piece {
 
 impl Piece {
     fn is_backdrop(&self) -> bool {
-        self.kind == Kind::Backdrop
+        self.face.is_none()
     }
 }
 
@@ -156,7 +155,8 @@ impl Drawable for Piece {
 pub struct Pending {
     pub guest_id: i64,
     pub seat_index: i64,
-    pub image: ImageData,
+    pub label: String,
+    pub hue: f64,
     /// Where this person was last left, as a fraction of the venue plan, or
     /// `None` for someone who has never been placed and so waits in the tray.
     pub at: Option<(f64, f64)>,
@@ -170,226 +170,126 @@ pub struct Plan {
 }
 
 // ---------------------------------------------------------------------------
-// The handover
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    /// The chart waiting to be drawn, left here by [`show`] and collected by the
-    /// board on its next turn round the loop.
-    static NEXT: RefCell<Option<Plan>> = const { RefCell::new(None) };
-    /// Where the board reports an arrangement worth saving.
-    static SINK: RefCell<Option<Signal<Option<Vec<SeatPlacement>>>>> = const { RefCell::new(None) };
-    /// Whether the chart is on screen. A hidden canvas is not worth a frame.
-    static ON_SCREEN: Cell<bool> = const { Cell::new(false) };
-    /// Whether the one event loop this page gets has been started.
-    static RUNNING: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Draws `plan` on the canvas with the given element id, starting the event loop
-/// if this is the first chart the page has opened.
-///
-/// `sink` is written every time the arrangement changes, which is how the saved
-/// chart follows what is on screen.
-pub fn show(canvas_id: &str, plan: Plan, sink: Signal<Option<Vec<SeatPlacement>>>) {
-    SINK.with(|slot| *slot.borrow_mut() = Some(sink));
-    NEXT.with(|slot| *slot.borrow_mut() = Some(plan));
-    ON_SCREEN.set(true);
-    if !RUNNING.get() {
-        start(canvas_id);
-    }
-}
-
-/// Takes the chart off screen. The loop keeps running — the page only gets the
-/// one — but stops asking for frames.
-pub fn hide() {
-    ON_SCREEN.set(false);
-}
-
-fn start(canvas_id: &str) {
-    let Some(canvas) = canvas(canvas_id) else {
-        return complain("seating: the chart's canvas is not in the document");
-    };
-    let event_loop = match EventLoop::<Ready>::with_user_event().build() {
-        Ok(event_loop) => event_loop,
-        Err(e) => return complain(&format!("seating: no event loop: {e}")),
-    };
-    RUNNING.set(true);
-    event_loop.set_control_flow(ControlFlow::Poll);
-    let proxy = event_loop.create_proxy();
-    event_loop.spawn_app(Board {
-        canvas,
-        proxy,
-        window: None,
-        scene: None,
-        next: None,
-        building: false,
-        map_size: None,
-        stage: Rect::default(),
-        scale: 1.0,
-        deferred: false,
-        pointers: 0,
-        refit_pending: false,
-    });
-}
-
-fn canvas(id: &str) -> Option<HtmlCanvasElement> {
-    web_sys::window()?
-        .document()?
-        .get_element_by_id(id)?
-        .dyn_into()
-        .ok()
-}
-
-/// Reports a problem the chart cannot recover from. There is no other log on
-/// this side of the wire, and a blank rectangle with nothing in the console is
-/// the worst way to find out the GPU is unavailable.
-fn complain(message: &str) {
-    web_sys::console::error_1(&JsValue::from_str(message));
-}
-
-// ---------------------------------------------------------------------------
 // The board
 // ---------------------------------------------------------------------------
 
-/// An engine that has finished initialising, with the chart it was built for.
-struct Ready {
-    engine: Engine,
-    plan: Plan,
-}
-
 struct Board {
     canvas: HtmlCanvasElement,
-    proxy: EventLoopProxy<Ready>,
-    window: Option<Arc<Window>>,
-    scene: Option<Box<Scene<Piece>>>,
+    /// `None` until the GPU has finished coming up.
+    scene: Option<Scene<Piece>>,
     /// A chart that should be on screen but is not yet.
     next: Option<Plan>,
-    /// Whether an engine is being built for `next` right now.
+    /// Whether an engine is being built right now.
     building: bool,
-    /// The venue plan's own size, kept so the stage can be refitted on a resize.
+    /// The venue plan's own size, kept so the stage can be refitted.
     map_size: Option<(f32, f32)>,
     /// The plan's current rectangle: the frame every placement is measured
     /// against.
     stage: Rect,
-    /// Device pixel ratio, so a token is the same size to the eye on any screen.
-    ///
-    /// Token rectangles follow it, but their textures do not: those are
-    /// rasterised once, at the ratio in force when the chart was built. Zooming
-    /// in therefore costs sharpness until the chart is reopened. Closing that
-    /// properly needs a way to re-upload one drawable's image, which haboard
-    /// does not yet expose.
+    /// Device pixel ratio. Token rectangles and their textures both follow it,
+    /// so a token is the same size, and equally sharp, at any zoom level.
     scale: f32,
-    /// Whether a nudge is being held back until the key it came from is
-    /// released. See [`commits`].
-    deferred: bool,
-    /// How many pointers are down: one for a held mouse button, one per finger.
-    pointers: u32,
-    /// Whether a refit is owed once the last of them lifts. See
-    /// [`track_pointers`](Board::track_pointers).
+    /// Whether a refit is owed once the drag it would disturb has ended.
     refit_pending: bool,
+    /// Whether the chart is on screen. A hidden canvas is not worth a frame.
+    on_screen: bool,
+    /// Where an arrangement worth saving is reported.
+    sink: Option<Signal<Option<Vec<SeatPlacement>>>>,
 }
 
 impl Board {
-    /// Starts building an engine for the chart that is waiting, if any.
-    fn build(&mut self) {
-        if self.building || self.next.is_none() {
-            return;
+    /// Feeds one input to the scene and acts on what it reports.
+    ///
+    /// Returns whether the scene handled it, which is what decides whether the
+    /// browser's own default behaviour is suppressed.
+    fn input(&mut self, input: Input) -> bool {
+        let Some(scene) = &mut self.scene else {
+            return false;
+        };
+        let response = scene.handle(input);
+        if response.commit.is_now() {
+            self.publish();
         }
-        let Some(window) = self.window.clone() else {
-            return;
-        };
-        let Some(plan) = self.next.take() else {
-            return;
-        };
-        // Release the old surface before the new engine asks the same canvas for
-        // one.
-        self.scene = None;
-        self.building = true;
-        let proxy = self.proxy.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let engine = Engine::new(window).await;
-            let _ = proxy.send_event(Ready { engine, plan });
-        });
+        // A refit held back while a drag was live can run as soon as it ends.
+        if self.refit_pending && !self.is_dragging() {
+            self.refit();
+        }
+        response.handled
     }
 
-    /// Fills a fresh scene with the venue plan and everyone on it.
-    fn install(&mut self, engine: Engine, plan: Plan) {
-        let Some(window) = self.window.clone() else {
-            return;
-        };
-        let mut scene = Scene::new(engine, Vec::new(), SceneMode::Edit);
-        // The canvas has had its CSS size all along, but the `Resized` event
-        // that said so arrived while there was no scene to receive it.
-        scene.resize(window.inner_size());
+    fn is_dragging(&self) -> bool {
+        self.scene.as_ref().is_some_and(|scene| scene.is_dragging())
+    }
 
-        let (width, height) = scene.size();
-        let (width, height) = (width as f32, height as f32);
-        self.scale = window.scale_factor() as f32;
-        self.map_size = plan.map.as_ref().map(|&(_, w, h)| (w, h));
-        self.stage = seating::stage_rect(width, height, self.map_size, self.scale);
-
-        if let Some((image, ..)) = plan.map {
-            scene.drawables.push(Piece {
-                kind: Kind::Backdrop,
-                x: self.stage.x,
-                y: self.stage.y,
-                z: BACKDROP_Z,
-                w: self.stage.w,
-                h: self.stage.h,
-                image,
-            });
+    /// Takes the chart's surface to the canvas's current size, re-rasterising
+    /// every token if the device pixel ratio moved.
+    fn resized(&mut self) {
+        // The size the surface believes it has is what decides whether the
+        // backing store needs touching: assigning `width`/`height` clears the
+        // canvas, so it must not be done for a size it already is.
+        let current = self.scene.as_ref().map_or((0, 0), |scene| scene.size());
+        if let Some((width, height)) = web::resize_canvas_backing_store(&self.canvas, current) {
+            self.input(Input::Resize { width, height });
         }
 
+        let scale = (web::device_pixel_ratio() as f32).clamp(1.0, 3.0);
+        if scale != self.scale {
+            self.scale = scale;
+            self.rescale_tokens();
+        }
+        // Held until the gesture it would disturb has finished: haboard keeps a
+        // drag's starting positions in pixels, so moving a token underneath a
+        // live drag is discarded on the next move and leaves it placed against
+        // a stage that no longer exists.
+        if self.is_dragging() {
+            self.refit_pending = true;
+        } else {
+            self.refit();
+        }
+    }
+
+    /// Draws every token again at the current ratio.
+    ///
+    /// A label is pixels by the time haboard sees it, so zooming in cannot
+    /// sharpen one that was rasterised for a coarser display — it has to be
+    /// redrawn and re-uploaded.
+    fn rescale_tokens(&mut self) {
+        let Some(scene) = &mut self.scene else {
+            return;
+        };
         let (w, h) = (TOKEN_W * self.scale, TOKEN_H * self.scale);
-        let mut waiting = 0usize;
-        for token in plan.tokens {
-            let (x, y) = match token.at {
-                Some((nx, ny)) => seating::place(self.stage, nx, ny),
-                None => {
-                    let slot = seating::tray_slot(waiting, height, self.scale);
-                    waiting += 1;
-                    slot
-                }
+        let faces: Vec<_> = scene
+            .drawables
+            .iter_with_ids()
+            .filter_map(|(id, piece)| piece.face.clone().map(|face| (id, face)))
+            .collect();
+        for (id, face) in faces {
+            let Some(image) = token_image(&face.label, face.hue, self.scale) else {
+                continue;
             };
-            scene.drawables.push(Piece {
-                kind: Kind::Token {
-                    guest_id: token.guest_id,
-                    seat_index: token.seat_index,
-                },
-                x,
-                y,
-                z: 0.0,
-                w,
-                h,
-                image: token.image,
-            });
+            if let Some(piece) = scene.drawables.get_mut(id) {
+                piece.image = image;
+                piece.w = w;
+                piece.h = h;
+            }
+            scene.drawables.refresh_image(id);
         }
-
-        scene.render();
-        self.scene = Some(Box::new(scene));
+        scene.request_redraw();
     }
 
-    /// Refits the plan after the window changes shape, carrying everyone on it
+    /// Refits the plan after the surface changes shape, carrying everyone on it
     /// along by the fraction of the plan they were standing on.
     fn refit(&mut self) {
-        let Some(window) = self.window.clone() else {
-            return;
-        };
-        let scale = window.scale_factor() as f32;
-        let map_size = self.map_size;
-        let was = self.stage;
+        self.refit_pending = false;
+        let (map_size, was, scale) = (self.map_size, self.stage, self.scale);
         let Some(scene) = &mut self.scene else {
             return;
         };
         let (width, height) = scene.size();
         let now = seating::stage_rect(width as f32, height as f32, map_size, scale);
-        if now == was && scale == self.scale {
+        if now == was {
             return;
         }
-        // A token is a fixed size to the eye, not a fixed number of pixels, so
-        // its rectangle is re-derived whenever the device pixel ratio moves
-        // under it — which browser zoom does, as does dragging the window to a
-        // monitor of a different density.
         let (w, h) = (TOKEN_W * scale, TOKEN_H * scale);
         for piece in scene.drawables.iter_mut() {
             if piece.is_backdrop() {
@@ -404,222 +304,352 @@ impl Board {
                 piece.h = h;
             }
         }
+        scene.request_redraw();
         self.stage = now;
-        self.scale = scale;
     }
 
-    /// Counts pointers going down and coming up.
-    ///
-    /// A refit moves every token so it stays on the same spot of the venue
-    /// plan. haboard, though, captures a drag's starting positions in pixels
-    /// when the pointer goes down and recomputes `start + delta` on every move,
-    /// so anything the chart does to a dragged token underneath a live gesture
-    /// is discarded on the very next move — leaving it placed against a stage
-    /// that no longer exists, permanently, because no later refit will disturb
-    /// it. A refit arriving mid-gesture is therefore held until the last pointer
-    /// lifts.
-    ///
-    /// Deferring is not merely safer, it is also the correct frame: the venue
-    /// plan does not move while the refit is held, so the spot the guest was
-    /// dropped on is the spot on the *old* stage, which is exactly what the
-    /// deferred refit measures against.
-    fn track_pointers(&mut self, event: &WindowEvent) {
-        match event {
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
-                ..
-            } => self.pointers += 1,
-            WindowEvent::MouseInput {
-                state: ElementState::Released,
-                button: MouseButton::Left,
-                ..
-            } => self.pointers = self.pointers.saturating_sub(1),
-            WindowEvent::Touch(touch) => match touch.phase {
-                TouchPhase::Started => self.pointers += 1,
-                TouchPhase::Ended | TouchPhase::Cancelled => {
-                    self.pointers = self.pointers.saturating_sub(1)
-                }
-                TouchPhase::Moved => {}
-            },
-            // A window that loses focus never sees the button come back up.
-            WindowEvent::Focused(false) => self.pointers = 0,
-            _ => {}
+    /// Fills a fresh scene with the venue plan and everyone on it.
+    fn install(&mut self, engine: Engine, plan: Plan) {
+        let mut scene = Scene::new(engine, Vec::new(), SceneMode::Edit);
+        let (width, height) = scene.size();
+        let (width, height) = (width as f32, height as f32);
+
+        self.map_size = plan.map.as_ref().map(|&(_, w, h)| (w, h));
+        self.stage = seating::stage_rect(width, height, self.map_size, self.scale);
+
+        if let Some((image, ..)) = plan.map {
+            scene.drawables.push(Piece {
+                face: None,
+                guest_id: 0,
+                seat_index: 0,
+                x: self.stage.x,
+                y: self.stage.y,
+                z: BACKDROP_Z,
+                w: self.stage.w,
+                h: self.stage.h,
+                image,
+            });
         }
+
+        let (w, h) = (TOKEN_W * self.scale, TOKEN_H * self.scale);
+        let mut waiting = 0usize;
+        for token in plan.tokens {
+            let Some(image) = token_image(&token.label, token.hue, self.scale) else {
+                continue;
+            };
+            let (x, y) = match token.at {
+                Some((nx, ny)) => seating::place(self.stage, nx, ny),
+                None => {
+                    let slot = seating::tray_slot(waiting, height, self.scale);
+                    waiting += 1;
+                    slot
+                }
+            };
+            scene.drawables.push(Piece {
+                face: Some(Face {
+                    label: token.label,
+                    hue: token.hue,
+                }),
+                guest_id: token.guest_id,
+                seat_index: token.seat_index,
+                x,
+                y,
+                z: 0.0,
+                w,
+                h,
+                image,
+            });
+        }
+
+        scene.request_redraw();
+        self.scene = Some(scene);
     }
 
     /// Hands the arrangement now on screen back to the application.
     fn publish(&self) {
-        let Some(scene) = &self.scene else {
+        let (Some(scene), Some(mut sink)) = (&self.scene, self.sink) else {
             return;
         };
         let stage = self.stage;
         let seats: Vec<SeatPlacement> = scene
             .drawables
             .iter()
-            .filter_map(|piece| match piece.kind {
-                Kind::Token {
-                    guest_id,
-                    seat_index,
-                } => {
-                    let (x, y) = seating::normalise(stage, piece.x, piece.y);
-                    Some(SeatPlacement {
-                        guest_id,
-                        seat_index,
-                        x,
-                        y,
-                    })
+            .filter(|piece| !piece.is_backdrop())
+            .map(|piece| {
+                let (x, y) = seating::normalise(stage, piece.x, piece.y);
+                SeatPlacement {
+                    guest_id: piece.guest_id,
+                    seat_index: piece.seat_index,
+                    x,
+                    y,
                 }
-                Kind::Backdrop => None,
             })
             .collect();
-        SINK.with(|slot| {
-            if let Some(mut sink) = *slot.borrow() {
-                sink.set(Some(seats));
+        sink.set(Some(seats));
+    }
+
+    /// Draws a frame, if there is anything new to look at.
+    fn frame(&mut self) {
+        if !self.on_screen {
+            return;
+        }
+        if let Some(scene) = &mut self.scene
+            && scene.needs_redraw()
+        {
+            scene.render();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The one board a page has
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// The live chart. A page shows at most one, and it outlives any single
+    /// render of the component that opened it.
+    static BOARD: RefCell<Option<Rc<RefCell<Board>>>> = const { RefCell::new(None) };
+}
+
+/// Draws `plan` on the canvas with the given element id.
+///
+/// `sink` is written every time the arrangement changes, which is how the saved
+/// chart follows what is on screen.
+pub fn show(canvas_id: &str, plan: Plan, sink: Signal<Option<Vec<SeatPlacement>>>) {
+    let board = match BOARD.with(|slot| slot.borrow().clone()) {
+        Some(board) => board,
+        None => {
+            let Some(board) = start(canvas_id) else {
+                return;
+            };
+            board
+        }
+    };
+    {
+        let mut board = board.borrow_mut();
+        board.sink = Some(sink);
+        board.on_screen = true;
+        board.next = Some(plan);
+    }
+    build(&board);
+}
+
+/// Takes the chart off screen, saving anything a deferred nudge still owes.
+pub fn hide() {
+    let Some(board) = BOARD.with(|slot| slot.borrow().clone()) else {
+        return;
+    };
+    let owed = {
+        let mut board = board.borrow_mut();
+        board.on_screen = false;
+        board
+            .scene
+            .as_mut()
+            .is_some_and(|scene| scene.take_pending_commit())
+    };
+    // A run of nudges is normally flushed by the key release that ends it. A
+    // window closed mid-run never sees that release, and the change is already
+    // applied to the scene, so it has to be saved on the way out.
+    if owed {
+        board.borrow().publish();
+    }
+}
+
+/// Builds the engine for whatever chart is waiting, if one is.
+///
+/// A new chart means a new scene, and a scene owns its engine, so switching
+/// events rebuilds both — haboard could now be asked to swap the contents in
+/// place, but rebuilding also re-reads the canvas size and the pixel ratio,
+/// which is what an event opened on a different screen needs.
+fn build(board: &Rc<RefCell<Board>>) {
+    let (canvas, plan) = {
+        let mut state = board.borrow_mut();
+        if state.building || state.next.is_none() {
+            return;
+        }
+        let Some(plan) = state.next.take() else {
+            return;
+        };
+        // Release the old surface before the new engine asks the same canvas
+        // for one.
+        state.scene = None;
+        state.building = true;
+        state.scale = (web::device_pixel_ratio() as f32).clamp(1.0, 3.0);
+        (state.canvas.clone(), plan)
+    };
+
+    let board = Rc::clone(board);
+    wasm_bindgen_futures::spawn_local(async move {
+        // Nothing has a surface yet, so a zero "current" size asks for the
+        // backing store to be set unconditionally.
+        let size = web::resize_canvas_backing_store(&canvas, (0, 0))
+            .unwrap_or_else(|| web::canvas_physical_size(&canvas));
+        match Engine::from_canvas(canvas, size).await {
+            Ok(engine) => {
+                let mut state = board.borrow_mut();
+                state.building = false;
+                state.install(engine, plan);
+            }
+            Err(e) => {
+                board.borrow_mut().building = false;
+                // Distinguishing these matters: no adapter at all means the
+                // browser has neither WebGPU nor WebGL and the person needs a
+                // newer one; a device request refused after an adapter was
+                // found is our bug, not theirs.
+                complain(&format!("seating: the chart cannot be drawn: {e}"));
+                return;
+            }
+        }
+        // A second chart may have arrived while the first was building.
+        build(&board);
+    });
+}
+
+fn start(canvas_id: &str) -> Option<Rc<RefCell<Board>>> {
+    let canvas: HtmlCanvasElement = web_sys::window()?
+        .document()?
+        .get_element_by_id(canvas_id)?
+        .dyn_into()
+        .ok()?;
+
+    let board = Rc::new(RefCell::new(Board {
+        canvas: canvas.clone(),
+        scene: None,
+        next: None,
+        building: false,
+        map_size: None,
+        stage: Rect::default(),
+        scale: (web::device_pixel_ratio() as f32).clamp(1.0, 3.0),
+        refit_pending: false,
+        on_screen: false,
+        sink: None,
+    }));
+
+    listen(&board, &canvas);
+    observe(&board, &canvas);
+    animate(&board);
+
+    BOARD.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&board)));
+    Some(board)
+}
+
+/// Reports a problem the chart cannot recover from. There is no other log on
+/// this side of the wire, and a blank rectangle with nothing in the console is
+/// the worst way to find out the GPU is unavailable.
+fn complain(message: &str) {
+    web_sys::console::error_1(&JsValue::from_str(message));
+}
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+//
+// haboard translates a DOM event into its own vocabulary but deliberately does
+// not attach the listeners, because where they go is a policy the host owns.
+// Both of the choices below are ours: the canvas is focusable and keys are read
+// from it rather than from the window, so a closed chart cannot swallow the
+// arrow keys of the page around it; and a pointer is a mouse or a finger
+// according to `pointerType`, so a stylus drives the rubber band rather than
+// being treated as one more finger.
+
+/// Attaches the pointer and keyboard listeners to the canvas.
+fn listen(board: &Rc<RefCell<Board>>, canvas: &HtmlCanvasElement) {
+    for (name, phase) in [
+        ("pointerdown", PointerPhase::Down),
+        ("pointermove", PointerPhase::Move),
+        ("pointerup", PointerPhase::Up),
+        ("pointercancel", PointerPhase::Cancel),
+    ] {
+        let board = Rc::clone(board);
+        let target = canvas.clone();
+        let handler = Closure::<dyn FnMut(PointerEvent)>::new(move |event: PointerEvent| {
+            let id = if event.pointer_type() == "touch" {
+                PointerId::Touch(event.pointer_id() as u64)
+            } else {
+                PointerId::Mouse
+            };
+            let (x, y) = web::pointer_position(&event, &target);
+            let mut state = board.borrow_mut();
+            state.input(Input::Modifiers(web::modifiers_from_pointer_event(&event)));
+            let handled = state.input(Input::Pointer { id, phase, x, y });
+            drop(state);
+            if phase == PointerPhase::Down {
+                // Keeps the gesture alive when the pointer leaves the canvas,
+                // and gives the canvas the keyboard so arrow keys reach the
+                // scene rather than scrolling the page behind it.
+                let _ = target.set_pointer_capture(event.pointer_id());
+                let _ = target.unchecked_ref::<web_sys::HtmlElement>().focus();
+            }
+            if handled {
+                event.prevent_default();
             }
         });
+        let _ = canvas.add_event_listener_with_callback(name, handler.as_ref().unchecked_ref());
+        handler.forget();
     }
-}
 
-/// What handling `event` means for saving.
-enum Commit {
-    /// A change finished; publish it.
-    Now,
-    /// A change happened but more are coming; hold it until they stop.
-    Defer,
-    /// Nothing worth saving.
-    No,
-}
-
-/// Whether handling `event` finished a change worth saving.
-///
-/// A held arrow key repeats at the keyboard's own rate and every repeat is a
-/// real nudge, so treating each as finished asks the server to rewrite the whole
-/// chart tens of times a second for what the guest arranging it experiences as
-/// one gesture. Repeats are deferred instead: the position that matters is the
-/// one the key comes up on, and [`publish`] sends the entire arrangement anyway,
-/// so nothing is lost by waiting for it.
-///
-/// [`publish`]: Board::publish
-fn commits(event: &WindowEvent) -> Commit {
-    match event {
-        WindowEvent::MouseInput {
-            state: ElementState::Released,
-            button: MouseButton::Left,
-            ..
-        } => Commit::Now,
-        WindowEvent::KeyboardInput {
-            event:
-                winit::event::KeyEvent {
-                    state: ElementState::Pressed,
-                    repeat,
-                    ..
-                },
-            ..
-        } => {
-            if *repeat {
-                Commit::Defer
-            } else {
-                Commit::Now
+    for (name, pressed) in [("keydown", true), ("keyup", false)] {
+        let board = Rc::clone(board);
+        let handler = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
+            let mut state = board.borrow_mut();
+            state.input(Input::Modifiers(web::modifiers_from_keyboard_event(&event)));
+            let handled = state.input(Input::Key {
+                key: web::key_from_event(&event),
+                pressed,
+                repeat: event.repeat(),
+            });
+            drop(state);
+            if handled {
+                event.prevent_default();
             }
-        }
-        WindowEvent::Touch(touch) => {
-            if matches!(touch.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                Commit::Now
-            } else {
-                Commit::No
-            }
-        }
-        _ => Commit::No,
+        });
+        let _ = canvas.add_event_listener_with_callback(name, handler.as_ref().unchecked_ref());
+        handler.forget();
     }
 }
 
-/// Whether `event` ends a run of key repeats, and so releases whatever
-/// [`Commit::Defer`] has been holding.
+/// Watches the canvas for a change of size — or of pixel ratio.
 ///
-/// A key coming up is never "handled" by the scene — it only acts on presses —
-/// so this is asked before the handled check rather than through it. Losing
-/// focus counts too: a window that goes away mid-nudge still has to save.
-fn flushes(event: &WindowEvent) -> bool {
-    matches!(
-        event,
-        WindowEvent::KeyboardInput {
-            event: winit::event::KeyEvent {
-                state: ElementState::Released,
-                ..
-            },
-            ..
-        } | WindowEvent::Focused(false)
-    )
+/// `device-pixel-content-box` rather than the default: zooming the page leaves
+/// the CSS box untouched while the backing store has to change, and a
+/// content-box observer simply never fires for it.
+fn observe(board: &Rc<RefCell<Board>>, canvas: &HtmlCanvasElement) {
+    let board = Rc::clone(board);
+    let handler = Closure::<dyn FnMut()>::new(move || {
+        board.borrow_mut().resized();
+    });
+    let Ok(observer) = ResizeObserver::new(handler.as_ref().unchecked_ref()) else {
+        complain("seating: the chart cannot watch its canvas for resizes");
+        return;
+    };
+    let options = ResizeObserverOptions::new();
+    options.set_box(ResizeObserverBoxOptions::DevicePixelContentBox);
+    observer.observe_with_options(canvas, &options);
+    handler.forget();
+    // The observer must outlive this call; it is never disconnected because the
+    // canvas lives as long as the page does.
+    std::mem::forget(observer);
 }
 
-impl ApplicationHandler<Ready> for Board {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-        let attributes = Window::default_attributes().with_canvas(Some(self.canvas.clone()));
-        match event_loop.create_window(attributes) {
-            Ok(window) => self.window = Some(Arc::new(window)),
-            Err(e) => return complain(&format!("seating: no window: {e}")),
-        }
-        self.build();
-    }
-
-    fn user_event(&mut self, _: &ActiveEventLoop, ready: Ready) {
-        self.building = false;
-        self.install(ready.engine, ready.plan);
-        // A second chart may have arrived while the first was still building.
-        self.build();
-    }
-
-    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        if let Some(plan) = NEXT.with(|slot| slot.borrow_mut().take()) {
-            self.next = Some(plan);
-            self.build();
-        }
-        if ON_SCREEN.get()
-            && let Some(window) = &self.window
+/// Drives the frame loop.
+fn animate(board: &Rc<RefCell<Board>>) {
+    let board = Rc::clone(board);
+    let next = Rc::new(RefCell::new(None::<Closure<dyn FnMut()>>));
+    let again = Rc::clone(&next);
+    *next.borrow_mut() = Some(Closure::<dyn FnMut()>::new(move || {
+        board.borrow_mut().frame();
+        if let Some(window) = web_sys::window()
+            && let Some(callback) = again.borrow().as_ref()
         {
-            window.request_redraw();
+            let _ = window.request_animation_frame(callback.as_ref().unchecked_ref());
         }
+    }));
+    if let Some(window) = web_sys::window()
+        && let Some(callback) = next.borrow().as_ref()
+    {
+        let _ = window.request_animation_frame(callback.as_ref().unchecked_ref());
     }
-
-    fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-        if matches!(event, WindowEvent::RedrawRequested) {
-            if let Some(scene) = &mut self.scene {
-                scene.render();
-            }
-            return;
-        }
-        let handled = match &mut self.scene {
-            Some(scene) => scene.handle_window_event(&event),
-            None => return,
-        };
-        self.track_pointers(&event);
-        if matches!(event, WindowEvent::Resized(_)) {
-            self.refit_pending = true;
-        }
-        if self.refit_pending && self.pointers == 0 {
-            self.refit_pending = false;
-            self.refit();
-        }
-        if flushes(&event) && self.deferred {
-            self.deferred = false;
-            self.publish();
-            return;
-        }
-        if handled {
-            match commits(&event) {
-                Commit::Now => {
-                    self.deferred = false;
-                    self.publish();
-                }
-                Commit::Defer => self.deferred = true,
-                Commit::No => {}
-            }
-        }
-    }
+    std::mem::forget(next);
 }
 
 // ---------------------------------------------------------------------------
@@ -687,8 +717,8 @@ pub async fn map_image(url: &str) -> Option<(ImageData, f32, f32)> {
 }
 
 /// Waits for one image element to finish loading.
-async fn load(url: &str) -> Option<HtmlImageElement> {
-    let image = HtmlImageElement::new().ok()?;
+async fn load(url: &str) -> Option<web_sys::HtmlImageElement> {
+    let image = web_sys::HtmlImageElement::new().ok()?;
     // Without this a plan served from another origin taints the canvas and its
     // pixels cannot be read back at all. With it, a server that permits the read
     // works and one that does not fails cleanly, which is the difference between
@@ -703,7 +733,10 @@ async fn load(url: &str) -> Option<HtmlImageElement> {
     Some(image)
 }
 
-fn surface(width: u32, height: u32) -> Option<(HtmlCanvasElement, CanvasRenderingContext2d)> {
+fn surface(
+    width: u32,
+    height: u32,
+) -> Option<(HtmlCanvasElement, web_sys::CanvasRenderingContext2d)> {
     let canvas: HtmlCanvasElement = web_sys::window()?
         .document()?
         .create_element("canvas")
@@ -712,18 +745,18 @@ fn surface(width: u32, height: u32) -> Option<(HtmlCanvasElement, CanvasRenderin
         .ok()?;
     canvas.set_width(width.max(1));
     canvas.set_height(height.max(1));
-    let ctx: CanvasRenderingContext2d = canvas.get_context("2d").ok()??.dyn_into().ok()?;
+    let ctx: web_sys::CanvasRenderingContext2d = canvas.get_context("2d").ok()??.dyn_into().ok()?;
     Some((canvas, ctx))
 }
 
-fn pixels(ctx: &CanvasRenderingContext2d, width: u32, height: u32) -> Option<ImageData> {
+fn pixels(ctx: &web_sys::CanvasRenderingContext2d, width: u32, height: u32) -> Option<ImageData> {
     let data = ctx
         .get_image_data(0.0, 0.0, width as f64, height as f64)
         .ok()?;
     Some(ImageData::rgba(width, height, data.data().0))
 }
 
-fn rounded_rect(ctx: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f64, r: f64) {
+fn rounded_rect(ctx: &web_sys::CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f64, r: f64) {
     ctx.begin_path();
     ctx.move_to(x + r, y);
     ctx.line_to(x + w - r, y);

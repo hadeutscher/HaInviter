@@ -71,24 +71,40 @@ urlencoding = "2"
 # target rather than to the `web` feature: that way `cargo check` and the test
 # suite never build a GPU stack they cannot use.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-haboard = "0.1"
+# Default features off: those are the winit adapter and the application shell,
+# and the chart is a control inside a page that already owns its event loop.
+# Turning them off keeps winit out of the dependency graph entirely.
+haboard = { version = "0.2", default-features = false }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-winit = "0.30"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
 version = "0.3"
 features = [
+    "AddEventListenerOptions",
     "CanvasRenderingContext2d",
     "console",
+    "CssStyleDeclaration",
     "Document",
+    "DomRect",
     "Element",
+    "Event",
+    "EventTarget",
     "HtmlCanvasElement",
+    "HtmlElement",
     "HtmlImageElement",
     "ImageData",
+    "KeyboardEvent",
+    "PointerEvent",
+    "ResizeObserver",
+    "ResizeObserverBoxOptions",
+    "ResizeObserverEntry",
+    "ResizeObserverOptions",
+    "ResizeObserverSize",
     "Window",
 ]
+
 
 # Declared explicitly so the development helper can require its own feature:
 # without that, `cargo build` on a fresh checkout would try to compile it.
