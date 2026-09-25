@@ -26,6 +26,27 @@ pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 /// still refusing something that is plainly not a contact file.
 pub const MAX_VCF_BYTES: usize = 2 * 1024 * 1024;
 
+/// Largest request body the server will buffer, in bytes.
+///
+/// Arguments of a server function travel as JSON, where a `Vec<u8>` becomes an
+/// array of decimal numbers and so costs up to four characters per byte. Axum
+/// caps a buffered body at 2 MB unless told otherwise, which is below what the
+/// uploads above are allowed to be once inflated — and the framework reacts to
+/// the cap by panicking inside the extractor rather than answering, so the
+/// ceiling has to be set here, from the largest upload we accept.
+#[cfg(feature = "server")]
+pub const MAX_REQUEST_BYTES: usize = 5 * max_upload() + 64 * 1024;
+
+/// The largest single upload any endpoint accepts.
+#[cfg(feature = "server")]
+const fn max_upload() -> usize {
+    if MAX_IMAGE_BYTES > MAX_VCF_BYTES {
+        MAX_IMAGE_BYTES
+    } else {
+        MAX_VCF_BYTES
+    }
+}
+
 /// The active locale's strings, for messages that reach the user.
 #[cfg(feature = "server")]
 fn s() -> &'static crate::i18n::Strings {

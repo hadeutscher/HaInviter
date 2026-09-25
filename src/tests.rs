@@ -443,6 +443,19 @@ fn a_server_error_reaches_the_user_as_the_server_wrote_it() {
     assert_eq!(crate::ui::message_of(&unreachable), unreachable.to_string());
 }
 
+/// An upload that the endpoints accept must also fit through the transport: a
+/// `Vec<u8>` argument is JSON, where a byte costs up to four characters, and the
+/// framework answers a body over the limit with a panic rather than a message.
+#[test]
+fn the_body_limit_leaves_room_for_the_largest_upload() {
+    let largest = api::MAX_IMAGE_BYTES.max(api::MAX_VCF_BYTES);
+    assert!(
+        api::MAX_REQUEST_BYTES >= 4 * largest + 1024,
+        "MAX_REQUEST_BYTES ({}) is too small for a {largest}-byte upload",
+        api::MAX_REQUEST_BYTES,
+    );
+}
+
 /// Drops and recreates the schema so the test starts from nothing.
 async fn reset_schema(url: &str) {
     let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)

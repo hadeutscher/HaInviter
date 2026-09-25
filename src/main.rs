@@ -181,6 +181,10 @@ async fn main() {
             get(export_csv),
         )
         .serve_dioxus_application(ServeConfig::new(), App)
+        // Uploads arrive as arguments of a server function, JSON-encoded, so
+        // they need considerably more room than the 2 MB a body is given by
+        // default. See api::MAX_REQUEST_BYTES.
+        .layer(axum::extract::DefaultBodyLimit::max(api::MAX_REQUEST_BYTES))
         .into_make_service();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
