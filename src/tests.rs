@@ -428,6 +428,21 @@ async fn an_event_can_be_created_invited_to_and_answered() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// What the server said has to survive the trip to a toast, and the wording the
+/// transport wraps it in has changed before.
+#[test]
+fn a_server_error_reaches_the_user_as_the_server_wrote_it() {
+    use dioxus::prelude::ServerFnError;
+
+    let error = ServerFnError::new("that file is not an image");
+    assert_eq!(crate::ui::message_of(&error), "that file is not an image");
+
+    // A transport failure never reached our code, so its own wording is all
+    // there is to show.
+    let unreachable = ServerFnError::Deserialization("unexpected end of input".to_owned());
+    assert_eq!(crate::ui::message_of(&unreachable), unreachable.to_string());
+}
+
 /// Drops and recreates the schema so the test starts from nothing.
 async fn reset_schema(url: &str) {
     let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)

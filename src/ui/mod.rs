@@ -15,14 +15,17 @@ use material::Icon;
 
 /// Extracts the human-readable part of a server-function error.
 ///
-/// Server functions arrive wrapped in the transport's own wording; what the
-/// server actually said is the tail, and that is the only part worth showing
-/// anyone.
+/// What the server actually said is the `message` of a `ServerError`; the
+/// `Display` of that variant buries it between the transport's own wording and a
+/// debug rendering of the `details` field, so it is read out of the variant
+/// rather than parsed back out of the sentence. Every other variant describes a
+/// transport failure that never reached our code, and there its whole `Display`
+/// is the most we know.
 pub fn message_of(error: &ServerFnError) -> String {
-    let text = error.to_string();
-    text.rsplit_once(": ")
-        .map(|(_, tail)| tail.to_owned())
-        .unwrap_or(text)
+    match error {
+        ServerFnError::ServerError { message, .. } => message.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// The public front door. There is deliberately nothing to do here: guests

@@ -7,7 +7,10 @@ use crate::{
     api,
     i18n::{active, t},
     types::{InviteView, Rsvp, RsvpSubmission},
-    ui::material::{Button, ButtonKind, Chip, Icon, Loading, SelectField, TextArea, Tone},
+    ui::{
+        material::{Button, ButtonKind, Chip, Icon, Loading, SelectField, TextArea, Tone},
+        message_of,
+    },
 };
 use dioxus::prelude::*;
 
@@ -316,12 +319,4 @@ fn InviteCard(token: String, initial: InviteView) -> Element {
             }
         }
     }
-}
-
-/// Extracts the human-readable part of a server-function error.
-fn message_of(error: &ServerFnError) -> String {
-    let text = error.to_string();
-    text.rsplit_once(": ")
-        .map(|(_, tail)| tail.to_owned())
-        .unwrap_or(text)
 }
