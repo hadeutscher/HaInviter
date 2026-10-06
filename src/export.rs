@@ -7,7 +7,7 @@ use crate::types::GuestDto;
 /// The output starts with a UTF-8 BOM so Excel opens non-ASCII guest names
 /// correctly, which is the whole point of downloading the file.
 ///
-/// `invite_template` is the locale's invitation message; it is rendered per
+/// `invite_template` is the event's message or the locale default; it is rendered per
 /// guest into a ready `wa.me` link, so a host who would rather work down a
 /// spreadsheet than the admin panel sends exactly the same wording.
 pub fn responses_csv(guests: &[GuestDto], base_url: &str, invite_template: &str) -> String {

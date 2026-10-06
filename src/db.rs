@@ -181,6 +181,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     CREATE INDEX IF NOT EXISTS seats_event_idx ON seats (event_id);
     ",
     ),
+    (
+        "0004-event-whatsapp-message",
+        "ALTER TABLE events ADD COLUMN IF NOT EXISTS whatsapp_message TEXT NOT NULL DEFAULT '';",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -345,7 +349,7 @@ pub async fn setting_or_insert<C: GenericClient>(
 
 const EVENT_FIELDS: &str = "title, hosts, description, cover_image, location, \
                             location_url, starts_at, rsvp_deadline, allow_plus_ones, \
-                            venue_map";
+                            venue_map, whatsapp_message";
 
 fn event_from_row(row: &tokio_postgres::Row, offset: usize) -> EventInput {
     EventInput {
@@ -359,6 +363,7 @@ fn event_from_row(row: &tokio_postgres::Row, offset: usize) -> EventInput {
         rsvp_deadline: row.get(offset + 7),
         allow_plus_ones: row.get(offset + 8),
         venue_map: row.get(offset + 9),
+        whatsapp_message: row.get(offset + 10),
     }
 }
 
@@ -399,8 +404,8 @@ pub async fn create_event<C: GenericClient>(client: &C, input: &EventInput) -> R
     let row = client
         .query_one(
             "INSERT INTO events (title, hosts, description, cover_image, location, location_url,
-                                 starts_at, rsvp_deadline, allow_plus_ones, venue_map, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
+                                 starts_at, rsvp_deadline, allow_plus_ones, venue_map, whatsapp_message, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
             &[
                 &input.title,
                 &input.hosts,
@@ -412,6 +417,7 @@ pub async fn create_event<C: GenericClient>(client: &C, input: &EventInput) -> R
                 &input.rsvp_deadline,
                 &input.allow_plus_ones,
                 &input.venue_map,
+                &input.whatsapp_message,
                 &now(),
             ],
         )
@@ -429,8 +435,9 @@ pub async fn update_event<C: GenericClient>(
         .execute(
             "UPDATE events SET title = $1, hosts = $2, description = $3, cover_image = $4,
                                location = $5, location_url = $6, starts_at = $7,
-                               rsvp_deadline = $8, allow_plus_ones = $9, venue_map = $10
-             WHERE id = $11",
+                               rsvp_deadline = $8, allow_plus_ones = $9, venue_map = $10,
+                               whatsapp_message = $11
+             WHERE id = $12",
             &[
                 &input.title,
                 &input.hosts,
@@ -442,6 +449,7 @@ pub async fn update_event<C: GenericClient>(
                 &input.rsvp_deadline,
                 &input.allow_plus_ones,
                 &input.venue_map,
+                &input.whatsapp_message,
                 &id,
             ],
         )

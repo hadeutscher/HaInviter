@@ -674,5 +674,6 @@ fn sanitise(mut input: EventInput) -> EventInput {
     input.starts_at = one_line(&input.starts_at);
     input.rsvp_deadline = one_line(&input.rsvp_deadline);
     input.description = input.description.trim().chars().take(4000).collect();
+    input.whatsapp_message = input.whatsapp_message.trim().chars().take(4000).collect();
     input
 }

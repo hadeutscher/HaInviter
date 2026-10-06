@@ -58,6 +58,9 @@ pub struct EventInput {
     /// Who is inviting, e.g. "Dana & Yuval". Shown above the title.
     pub hosts: String,
     pub description: String,
+    /// Optional WhatsApp template; {name} and {link} are filled per guest.
+    #[serde(default)]
+    pub whatsapp_message: String,
     /// Absolute URL, or a `/uploads/…` path produced by [`crate::api::upload_cover`].
     pub cover_image: String,
     pub location: String,
@@ -74,6 +77,16 @@ pub struct EventInput {
     /// `/uploads/…` path produced by [`crate::api::upload_image`]. Empty for an
     /// event whose chart is a blank sheet.
     pub venue_map: String,
+}
+
+impl EventInput {
+    pub fn whatsapp_template<'a>(&'a self, default: &'a str) -> &'a str {
+        if self.whatsapp_message.trim().is_empty() {
+            default
+        } else {
+            &self.whatsapp_message
+        }
+    }
 }
 
 /// One row of the admin panel's event list, with response tallies.

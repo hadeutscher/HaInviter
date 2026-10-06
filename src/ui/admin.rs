@@ -446,6 +446,15 @@ fn EventFields(token: String, form: Signal<EventInput>) -> Element {
                 }
             }
             div { class: "form-span-2",
+                TextArea {
+                    label: s.field_whatsapp.to_owned(),
+                    value: current.whatsapp_message.clone(),
+                    rows: 5,
+                    supporting: s.field_whatsapp_help.to_owned(),
+                    oninput: move |e: FormEvent| form.with_mut(|f| f.whatsapp_message = e.value()),
+                }
+            }
+            div { class: "form-span-2",
                 ImageField {
                     token: tok(),
                     label: s.field_cover.to_owned(),
@@ -607,6 +616,7 @@ pub fn AdminEvent(token: String, event_id: i64) -> Element {
                             event_id,
                             base_url: base_url.clone(),
                             guests: view.guests.clone(),
+                            invite_template: view.event.whatsapp_template(s.invite_message).to_owned(),
                             toast,
                             reload: detail,
                         }
@@ -737,6 +747,7 @@ fn GuestsTab(
     event_id: i64,
     base_url: String,
     guests: Vec<GuestDto>,
+    invite_template: String,
     toast: Signal<Toast>,
     reload: Resource<Result<EventAdminView, ServerFnError>>,
 ) -> Element {
@@ -951,6 +962,7 @@ fn GuestsTab(
                                     key: "{guest.id}",
                                     guest: guest.clone(),
                                     origin: origin(),
+                                    invite_template: invite_template.clone(),
                                     on_edit: move |g: GuestDto| {
                                         edit_name.set(g.name.clone());
                                         edit_phone.set(g.phone.clone());
@@ -1049,6 +1061,7 @@ fn GuestRow(
     token: String,
     guest: GuestDto,
     origin: String,
+    invite_template: String,
     on_edit: EventHandler<GuestDto>,
     on_remove: EventHandler<GuestDto>,
     on_reissued: EventHandler<String>,
@@ -1074,7 +1087,7 @@ fn GuestRow(
     // real link: an `href` is immune to popup blocking, and on a phone it hands
     // straight to the installed app.
     let link = crate::contacts::invite_link(&origin, &guest.token);
-    let message = crate::contacts::invite_message(s.invite_message, &guest.name, &link);
+    let message = crate::contacts::invite_message(&invite_template, &guest.name, &link);
     let whatsapp_url = crate::contacts::wa_me(&guest.phone, &message);
 
     let mark_sent = move |_| {

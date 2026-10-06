@@ -331,7 +331,12 @@ pub fn default_region() -> String {
 /// so the message a host sends by tapping a row and the one they send out of a
 /// spreadsheet are word for word the same.
 pub fn invite_message(template: &str, name: &str, link: &str) -> String {
-    template.replace("{name}", name).replace("{link}", link)
+    let message = template.replace("{name}", name).replace("{link}", link);
+    if template.contains("{link}") {
+        message
+    } else {
+        format!("{message}\n{link}")
+    }
 }
 
 /// The full invitation URL for a guest token, given a public origin.
@@ -516,6 +521,23 @@ mod tests {
         let raw = "BEGIN:VCARD\nFN:Someone\nTEL;TYPE=CELL:052-000-0000\n\
                    TEL;TYPE=HOME:+972 4-000-0000\nEND:VCARD\n";
         assert_eq!(parse_vcards(raw)[0].phone, "052-000-0000");
+    }
+
+    #[test]
+    fn event_messages_personalise_and_keep_the_invitation_link() {
+        let link = "https://example.com/i/guest";
+        assert_eq!(
+            invite_message("Hi {name}! Join our wedding: {link}", "Dana", link),
+            format!("Hi Dana! Join our wedding: {link}")
+        );
+        assert_eq!(
+            invite_message("Hi {name}! Join our wedding.", "Dana", link),
+            format!("Hi Dana! Join our wedding.\n{link}")
+        );
+        let mut event = crate::types::EventInput::default();
+        assert_eq!(event.whatsapp_template("default"), "default");
+        event.whatsapp_message = "Custom {link}".to_owned();
+        assert_eq!(event.whatsapp_template("default"), "Custom {link}");
     }
 
     #[test]
