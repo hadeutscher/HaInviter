@@ -526,10 +526,14 @@ mod tests {
     #[test]
     fn event_messages_personalise_and_keep_the_invitation_link() {
         let link = "https://example.com/i/guest";
-        assert_eq!(invite_message("Hi {name}! Join our wedding: {link}", "Dana", link),
-                   format!("Hi Dana! Join our wedding: {link}"));
-        assert_eq!(invite_message("Hi {name}! Join our wedding.", "Dana", link),
-                   format!("Hi Dana! Join our wedding.\n{link}"));
+        assert_eq!(
+            invite_message("Hi {name}! Join our wedding: {link}", "Dana", link),
+            format!("Hi Dana! Join our wedding: {link}")
+        );
+        assert_eq!(
+            invite_message("Hi {name}! Join our wedding.", "Dana", link),
+            format!("Hi Dana! Join our wedding.\n{link}")
+        );
         let mut event = crate::types::EventInput::default();
         assert_eq!(event.whatsapp_template("default"), "default");
         event.whatsapp_message = "Custom {link}".to_owned();

@@ -115,12 +115,23 @@ async fn an_event_can_be_created_invited_to_and_answered() {
     let view = api::get_event(admin.clone(), event_id)
         .await
         .expect("event");
-    assert_eq!(view.event.whatsapp_message, "Hi {name}! Join our wedding: {link}");
+    assert_eq!(
+        view.event.whatsapp_message,
+        "Hi {name}! Join our wedding: {link}"
+    );
     let mut updated = view.event.clone();
     updated.whatsapp_message = "Join the celebration, {name}! {link}".to_owned();
-    api::update_event(admin.clone(), event_id, updated.clone()).await.expect("update event message");
-    assert_eq!(api::get_event(admin.clone(), event_id).await.expect("updated event").event.whatsapp_message,
-               updated.whatsapp_message);
+    api::update_event(admin.clone(), event_id, updated.clone())
+        .await
+        .expect("update event message");
+    assert_eq!(
+        api::get_event(admin.clone(), event_id)
+            .await
+            .expect("updated event")
+            .event
+            .whatsapp_message,
+        updated.whatsapp_message
+    );
     assert_eq!(view.guests.len(), 2);
     let dana = view
         .guests

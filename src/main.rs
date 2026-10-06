@@ -279,7 +279,8 @@ async fn export_csv(
     let body = export::responses_csv(
         &view.guests,
         &base,
-        view.event.whatsapp_template(i18n::from_env().strings().invite_message),
+        view.event
+            .whatsapp_template(i18n::from_env().strings().invite_message),
     );
     let filename = format!("{}-responses.csv", export::slug(&view.event.title));
     audit::record(
