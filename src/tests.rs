@@ -67,6 +67,9 @@ async fn an_event_can_be_created_invited_to_and_answered() {
             location: "Tel Aviv".to_owned(),
             whatsapp_message: "  Hi {name}! Join our wedding: {link}  ".to_owned(),
             starts_at: "2026-09-12T19:30".to_owned(),
+            invitation_image: "  /uploads/invitation.png  ".to_owned(),
+            card_message: "  Hi {name}! Celebrate {event}: {link}  ".to_owned(),
+            reminder_message: "  See you at {location}! {link}  ".to_owned(),
             allow_plus_ones: true,
             ..EventInput::default()
         },
@@ -119,7 +122,16 @@ async fn an_event_can_be_created_invited_to_and_answered() {
         view.event.whatsapp_message,
         "Hi {name}! Join our wedding: {link}"
     );
+    assert_eq!(view.event.invitation_image, "/uploads/invitation.png");
+    assert_eq!(
+        view.event.card_message,
+        "Hi {name}! Celebrate {event}: {link}"
+    );
+    assert_eq!(view.event.reminder_message, "See you at {location}! {link}");
     let mut updated = view.event.clone();
+    updated.invitation_image = "/uploads/new-invitation.png".to_owned();
+    updated.card_message = "Join us, {name}! {link}".to_owned();
+    updated.reminder_message = "One week to go! {link}".to_owned();
     updated.whatsapp_message = "Join the celebration, {name}! {link}".to_owned();
     api::update_event(admin.clone(), event_id, updated.clone())
         .await
@@ -132,6 +144,10 @@ async fn an_event_can_be_created_invited_to_and_answered() {
             .whatsapp_message,
         updated.whatsapp_message
     );
+    let saved = api::get_event(admin.clone(), event_id)
+        .await
+        .expect("saved card");
+    assert_eq!(saved.event, updated);
     assert_eq!(view.guests.len(), 2);
     let dana = view
         .guests

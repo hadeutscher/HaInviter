@@ -541,6 +541,33 @@ mod tests {
     }
 
     #[test]
+    fn card_captions_include_event_details_and_a_personal_link() {
+        let event = crate::types::EventInput {
+            title: "Our wedding".to_owned(),
+            starts_at: "2026-09-12T19:30".to_owned(),
+            location: "Tel Aviv".to_owned(),
+            ..Default::default()
+        };
+        let caption = event.card_caption(
+            "Hi {name}! {event} at {location}, {date}",
+            "Dana",
+            "https://example.com/i/dana",
+            crate::i18n::Locale::EnUs,
+        );
+        assert!(caption.starts_with("Hi Dana! Our wedding at Tel Aviv, Saturday"));
+        assert!(caption.ends_with("\nhttps://example.com/i/dana"));
+        assert!(!caption.contains("{date}"));
+        let hebrew = event.card_caption(
+            "{date}: {link}",
+            "Dana",
+            "personal-link",
+            crate::i18n::Locale::HeIl,
+        );
+        assert!(hebrew.contains("בספטמבר"));
+        assert_eq!(hebrew.matches("personal-link").count(), 1);
+    }
+
+    #[test]
     fn wa_me_links_to_a_chat_when_a_number_is_known() {
         assert_eq!(
             wa_me("+972501234567", "hi"),

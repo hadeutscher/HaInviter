@@ -61,6 +61,13 @@ pub struct EventInput {
     /// Optional WhatsApp template; {name} and {link} are filled per guest.
     #[serde(default)]
     pub whatsapp_message: String,
+    /// Optional uploaded invitation design. Blank generates a card from event details.
+    #[serde(default)]
+    pub invitation_image: String,
+    #[serde(default)]
+    pub card_message: String,
+    #[serde(default)]
+    pub reminder_message: String,
     /// Absolute URL, or a `/uploads/…` path produced by [`crate::api::upload_cover`].
     pub cover_image: String,
     pub location: String,
@@ -80,6 +87,20 @@ pub struct EventInput {
 }
 
 impl EventInput {
+    pub fn card_caption(
+        &self,
+        template: &str,
+        name: &str,
+        link: &str,
+        locale: crate::i18n::Locale,
+    ) -> String {
+        let text = template
+            .replace("{event}", &self.title)
+            .replace("{date}", &locale.format_datetime(&self.starts_at))
+            .replace("{location}", &self.location);
+        crate::contacts::invite_message(&text, name, link)
+    }
+
     pub fn whatsapp_template<'a>(&'a self, default: &'a str) -> &'a str {
         if self.whatsapp_message.trim().is_empty() {
             default

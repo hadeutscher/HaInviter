@@ -710,3 +710,12 @@ a.md-button { text-decoration: none; }
   color: var(--md-on-surface-variant);
   font-size: 0.75rem;
 }
+
+.invitation-card-preview {
+    display: block;
+    width: 100%;
+    max-height: 420px;
+    object-fit: contain;
+    border-radius: 12px;
+    background: #faf6ee;
+}

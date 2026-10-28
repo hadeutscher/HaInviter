@@ -185,6 +185,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0004-event-whatsapp-message",
         "ALTER TABLE events ADD COLUMN IF NOT EXISTS whatsapp_message TEXT NOT NULL DEFAULT '';",
     ),
+    (
+        "0005-invitation-card",
+        "ALTER TABLE events ADD COLUMN IF NOT EXISTS invitation_image TEXT NOT NULL DEFAULT '';
+         ALTER TABLE events ADD COLUMN IF NOT EXISTS card_message TEXT NOT NULL DEFAULT '';
+         ALTER TABLE events ADD COLUMN IF NOT EXISTS reminder_message TEXT NOT NULL DEFAULT '';",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -349,7 +355,7 @@ pub async fn setting_or_insert<C: GenericClient>(
 
 const EVENT_FIELDS: &str = "title, hosts, description, cover_image, location, \
                             location_url, starts_at, rsvp_deadline, allow_plus_ones, \
-                            venue_map, whatsapp_message";
+                            venue_map, whatsapp_message, invitation_image, card_message, reminder_message";
 
 fn event_from_row(row: &tokio_postgres::Row, offset: usize) -> EventInput {
     EventInput {
@@ -364,6 +370,9 @@ fn event_from_row(row: &tokio_postgres::Row, offset: usize) -> EventInput {
         allow_plus_ones: row.get(offset + 8),
         venue_map: row.get(offset + 9),
         whatsapp_message: row.get(offset + 10),
+        invitation_image: row.get(offset + 11),
+        card_message: row.get(offset + 12),
+        reminder_message: row.get(offset + 13),
     }
 }
 
@@ -404,8 +413,8 @@ pub async fn create_event<C: GenericClient>(client: &C, input: &EventInput) -> R
     let row = client
         .query_one(
             "INSERT INTO events (title, hosts, description, cover_image, location, location_url,
-                                 starts_at, rsvp_deadline, allow_plus_ones, venue_map, whatsapp_message, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
+                                 starts_at, rsvp_deadline, allow_plus_ones, venue_map, whatsapp_message, invitation_image, card_message, reminder_message, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id",
             &[
                 &input.title,
                 &input.hosts,
@@ -418,6 +427,9 @@ pub async fn create_event<C: GenericClient>(client: &C, input: &EventInput) -> R
                 &input.allow_plus_ones,
                 &input.venue_map,
                 &input.whatsapp_message,
+                &input.invitation_image,
+                &input.card_message,
+                &input.reminder_message,
                 &now(),
             ],
         )
@@ -436,8 +448,9 @@ pub async fn update_event<C: GenericClient>(
             "UPDATE events SET title = $1, hosts = $2, description = $3, cover_image = $4,
                                location = $5, location_url = $6, starts_at = $7,
                                rsvp_deadline = $8, allow_plus_ones = $9, venue_map = $10,
-                               whatsapp_message = $11
-             WHERE id = $12",
+                               whatsapp_message = $11, invitation_image = $12,
+                               card_message = $13, reminder_message = $14
+             WHERE id = $15",
             &[
                 &input.title,
                 &input.hosts,
@@ -450,6 +463,9 @@ pub async fn update_event<C: GenericClient>(
                 &input.allow_plus_ones,
                 &input.venue_map,
                 &input.whatsapp_message,
+                &input.invitation_image,
+                &input.card_message,
+                &input.reminder_message,
                 &id,
             ],
         )

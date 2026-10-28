@@ -1,6 +1,7 @@
 //! Page components.
 
 pub mod admin;
+pub mod invitation_card;
 pub mod invite;
 pub mod material;
 pub mod seating;
