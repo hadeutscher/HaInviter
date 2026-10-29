@@ -35,6 +35,9 @@ fn icon_path(name: &str) -> &'static str {
         "copy" => {
             "M15 1H5a2 2 0 0 0-2 2v13h2V3h10zm4 4H9a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2m0 16H9V7h10z"
         }
+        "image" => {
+            "M3 3h18v18H3zm2 2v14h14V5zm1 12 4-5 3 3 2-2 3 4zM8 7a2 2 0 1 0 0 4 2 2 0 0 0 0-4"
+        }
         "download" => "M12 3v10.2l3.6-3.6L17 11l-5 5-5-5 1.4-1.4L11 13.2V3zM5 19h14v2H5z",
         "upload" => "M12 16V6.8L8.4 10.4 7 9l5-5 5 5-1.4 1.4L13 6.8V16zM5 18h14v2H5z",
         "place" => {

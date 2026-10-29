@@ -10,6 +10,8 @@ good-looking invitation page for every guest.
   event details and a single question to answer.
 - **One-tap sending** — import contacts from a `.vcf`, then hand each guest's
   invitation to WhatsApp or the system share sheet straight from their row.
+- **Invitation cards** — upload your design or generate one from event details.
+  Preview and share it with a personal caption for a first invitation or reminder.
 - **Seating chart** — drag everyone who accepted onto a plan of the venue, one
   token per person arriving.
 - **No accounts** — access is by unguessable link, for hosts and guests alike.
@@ -46,6 +48,27 @@ apart.
 Material 3 is implemented directly in CSS and inline SVG rather than pulled in as
 a JavaScript component library: the invitation pages are opened on phones over
 mobile data, and there is no web font, icon font or CDN request in the bundle.
+
+## Invitation cards
+
+In an event's **Details** tab, upload an invitation image or leave it blank to
+use a generated card with the title, hosts, date and venue. Optional captions
+for **First invitation** and **Event reminder** support `{name}`, `{event}`,
+`{date}`, `{location}` and `{link}`. Blank captions use the deployment language's
+defaults; the guest's personal RSVP link is appended when `{link}` is omitted.
+
+From a guest's row, choose **Send invitation card**, select the first invitation
+or reminder preset, edit the short message, and preview the image. **Share image
+and message** opens the device's share sheet; choose WhatsApp and the intended
+recipient there. Browser and destination-app support varies, so **Download
+image** and **Copy message** are always available for attaching them manually.
+External image URLs must allow browser fetching; uploading the design directly
+avoids cross-origin restrictions. Downloading or copying does not mark an invite
+as sent. After sending, choose **Mark invitation as sent** to record it.
+
+Reminders are sent manually when ready, for example a week before the event;
+this feature does not schedule or automatically send messages. The original
+WhatsApp link-message action remains available alongside card sharing.
 
 ## Seating chart
 

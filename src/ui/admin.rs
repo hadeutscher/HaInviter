@@ -10,6 +10,7 @@ use crate::{
     types::{EventAdminView, EventInput, EventSummary, GuestDto, Rsvp},
     ui::{
         SeatingTarget,
+        invitation_card::InvitationCardDialog,
         material::{
             Button, ButtonKind, Chip, Dialog, EmptyState, Fab, Icon, IconButton, Loading,
             SelectField, Snackbar, Stat, Switch, TextArea, TextField, Tone,
@@ -27,13 +28,16 @@ use dioxus::prelude::*;
 type Toast = Option<(String, bool)>;
 
 /// Escapes a string for interpolation into a JavaScript source snippet.
-fn js_string(value: &str) -> String {
+pub(super) fn js_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
     for c in value.chars() {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
             c if c.is_control() => {}
             c => out.push(c),
         }
@@ -454,6 +458,30 @@ fn EventFields(token: String, form: Signal<EventInput>) -> Element {
                     oninput: move |e: FormEvent| form.with_mut(|f| f.whatsapp_message = e.value()),
                 }
             }
+            div { class: "form-span-2 stack",
+                ImageField {
+                    token: tok(),
+                    label: s.card_image.to_owned(),
+                    supporting: s.card_image_help.to_owned(),
+                    input_id: "invitation-card-file",
+                    value: current.invitation_image.clone(),
+                    on_change: move |url| form.with_mut(|f| f.invitation_image = url),
+                }
+                TextArea {
+                    label: s.card_first.to_owned(),
+                    value: current.card_message.clone(),
+                    supporting: s.card_template_help.to_owned(),
+                    rows: 3,
+                    oninput: move |e: FormEvent| form.with_mut(|f| f.card_message = e.value()),
+                }
+                TextArea {
+                    label: s.card_reminder.to_owned(),
+                    value: current.reminder_message.clone(),
+                    supporting: s.card_template_help.to_owned(),
+                    rows: 3,
+                    oninput: move |e: FormEvent| form.with_mut(|f| f.reminder_message = e.value()),
+                }
+            }
             div { class: "form-span-2",
                 ImageField {
                     token: tok(),
@@ -617,6 +645,7 @@ pub fn AdminEvent(token: String, event_id: i64) -> Element {
                             base_url: base_url.clone(),
                             guests: view.guests.clone(),
                             invite_template: view.event.whatsapp_template(s.invite_message).to_owned(),
+                            event: view.event.clone(),
                             toast,
                             reload: detail,
                         }
@@ -748,6 +777,7 @@ fn GuestsTab(
     base_url: String,
     guests: Vec<GuestDto>,
     invite_template: String,
+    event: EventInput,
     toast: Signal<Toast>,
     reload: Resource<Result<EventAdminView, ServerFnError>>,
 ) -> Element {
@@ -757,6 +787,7 @@ fn GuestsTab(
     let mut origin = use_signal(|| base_url);
     let mut toast = toast;
     let mut reload = reload;
+    let mut card_guest: Signal<Option<GuestDto>> = use_signal(|| None);
 
     // `HAINVITER_BASE_URL` when it is set, and the browser's own origin
     // otherwise. Resolved once, here, because the WhatsApp control needs a
@@ -963,6 +994,7 @@ fn GuestsTab(
                                     guest: guest.clone(),
                                     origin: origin(),
                                     invite_template: invite_template.clone(),
+                                    on_card: move |guest| card_guest.set(Some(guest)),
                                     on_edit: move |g: GuestDto| {
                                         edit_name.set(g.name.clone());
                                         edit_phone.set(g.phone.clone());
@@ -1030,6 +1062,19 @@ fn GuestsTab(
             }
         }
 
+        if let Some(guest) = card_guest() {
+            InvitationCardDialog {
+                key: "{guest.id}",
+                token: tok(),
+                on_sent: move |_| reload.restart(),
+                event: event.clone(),
+                guest,
+                origin: origin(),
+                onclose: move |_| card_guest.set(None),
+                on_message: move |text| toast.set(Some((text, false))),
+                on_error: move |text| toast.set(Some((text, true))),
+            }
+        }
         Dialog {
             open: removing().is_some(),
             title: s.guests_remove_title.to_owned(),
@@ -1062,6 +1107,7 @@ fn GuestRow(
     guest: GuestDto,
     origin: String,
     invite_template: String,
+    on_card: EventHandler<GuestDto>,
     on_edit: EventHandler<GuestDto>,
     on_remove: EventHandler<GuestDto>,
     on_reissued: EventHandler<String>,
@@ -1252,6 +1298,14 @@ fn GuestRow(
                         icon: "share",
                         label: s.action_share.to_owned(),
                         onclick: share,
+                    }
+                    IconButton {
+                        icon: "image",
+                        label: s.card_send.to_owned(),
+                        onclick: {
+                            let guest = guest.clone();
+                            move |_| on_card.call(guest.clone())
+                        },
                     }
                     IconButton {
                         icon: "edit",
